@@ -1,0 +1,32 @@
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Frontend (app) ignores
+app/node_modules/
+app/.next/
+app/out/
+app/build/
+app/.env.local
+app/tsconfig.tsbuildinfo
+
+# Backend ignores
+backend/target/
+backend/.mvn/
+backend/**/*.class
+backend/**/*.jar
+backend/**/*.war
+
+# IDE specific files
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

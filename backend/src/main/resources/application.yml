@@ -1,0 +1,40 @@
+server:
+  port: 8080
+  error:
+    include-message: always
+
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://pcfwdibqnpvikdntgypw.supabase.co:5432/postgres?sslmode=require}
+    username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 8
+      minimum-idle: 2
+      idle-timeout: 30000
+      connection-timeout: 20000
+      max-lifetime: 1800000
+
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+
+# Security & Secret Configurations
+matchpoint:
+  jwt:
+    # 256-bit base64-encoded signing key (HMAC-SHA256 compliant)
+    secret: ${JWT_SECRET:dGhpcy1pcy1hLXNlY3VyZS1zaWduaW5nLWtleS1mb3ItbWF0Y2hwb2ludC1iYWRtaW50b24tbGVhZ3VlLXN5c3RlbS1iYWNrZW5kLXByb2plY3Q=}
+    expiration-ms: 86400000 # 24 Hours validity
+
+logging:
+  level:
+    root: INFO
+    io.matchpoint: DEBUG
+    org.springframework.security: DEBUG
+    org.springframework.web: DEBUG

@@ -1,0 +1,530 @@
+Understood. Instead of a file, I’ll generate a comprehensive implementation-ready PRD directly in chat that you can copy into Word.
+Because this will be long (closer to an actual product document), I’ll structure it properly.
+Product Requirement Document (PRD)
+Badminton Tournament Organizer & Live Scoring Platform
+Version: 1.0 Status: Draft Prepared For: Product / Engineering / UI Team
+
+1. Executive Summary
+Product Name
+SmashArena (Working Title)
+Purpose
+Build a web-based badminton tournament management platform that enables organizers to:
+	•	Create and manage tournaments
+	•	Organize events (Singles/Doubles/Team)
+	•	Register participants
+	•	Generate fixtures automatically
+	•	Manage live scoring
+	•	Publish results publicly
+	•	Track rankings and statistics
+	•	Improve tournament operations
+The platform should support both:
+Individual Tournament Model
+Example:
+	•	Men’s Singles
+	•	Women’s Singles
+	•	Men’s Doubles
+	•	Women’s Doubles
+	•	Mixed Doubles
+Team / Franchise Tournament Model
+Example:
+	•	PBL style
+	•	Team vs Team
+	•	Multiple matches under one tie
+
+2. Business Goals
+Primary Goals
+	•	Digitize badminton tournaments
+	•	Eliminate manual score sheets
+	•	Improve audience engagement
+	•	Reduce tournament management effort
+
+Success Metrics
+Metric
+Target
+Tournament creation time
+<10 mins
+Live score delay
+<1 sec
+Registration completion
+>90%
+Match update success
+>99%
+Public page load
+<2 sec
+
+3. User Personas
+Player
+Goals:
+	•	Join tournament
+	•	Track match
+	•	View score
+Pain Points:
+	•	Missing schedule
+	•	No live updates
+
+Admin
+Goals:
+	•	Run tournament smoothly
+	•	Manage fixtures
+Pain Points:
+	•	Manual operations
+
+Umpire
+Goals:
+	•	Score quickly
+Pain Points:
+	•	Incorrect score handling
+
+4. Product Scope
+Included:
+✓ Authentication ✓ Tournament Management ✓ Event Management ✓ Team Management ✓ Registration ✓ Fixtures ✓ Live Scoring ✓ QR Check-in ✓ Notifications ✓ Public Page ✓ Media Gallery ✓ Leaderboard
+Excluded (Future):
+	•	Video streaming
+	•	AI refereeing
+	•	Merchandise
+
+5. Technology Architecture
+Frontend
+React Next.js TypeScript Tailwind
+
+Backend
+Java Spring Boot
+Modules:
+gateway
+auth
+tournament
+event
+fixture
+match
+score
+notification
+media
+leaderboard
+
+Database
+Supabase
+Services:
+PostgreSQL
+Realtime
+Storage
+Auth
+
+Communication
+REST
+WebSocket
+Event Queue
+
+6. Authentication
+Methods:
+Email Login
+Email
+Password
+
+Phone Login
+Phone
+OTP
+
+Session
+JWT
+Refresh Token
+
+7. Role Model
+Player
+Permissions:
+	•	Register
+	•	View scores
+	•	Check-in
+
+Admin
+Permissions:
+	•	Create tournaments
+	•	Update scores
+	•	Assign umpire
+
+Umpire
+Permissions:
+	•	Score match
+	•	Start/end match
+
+8. Tournament Module
+Entity:
+Tournament
+Fields:
+id
+name
+description
+location
+banner
+start_date
+end_date
+type
+status
+Status:
+Draft
+Open
+Live
+Completed
+Cancelled
+
+9. Event Module
+Each tournament supports multiple events.
+Example:
+Mumbai Open
+
+MS
+WS
+MD
+WD
+XD
+TEAM
+Fields:
+event_name
+category
+entry_limit
+format
+Formats:
+Knockout
+Round Robin
+Swiss
+League
+Hybrid
+
+10. Team / Franchise Module
+Support PBL style.
+Structure:
+Tournament
+
+Team A
+Team B
+
+↓
+
+Tie
+
+↓
+
+Individual Matches
+
+Team Fields:
+team_name
+logo
+captain
+owner
+coach
+
+Roster:
+players
+reserves
+
+11. Registration Module
+Flows:
+Self Registration
+Player → Register
+
+Admin Registration
+Admin → Add Player
+
+States:
+Pending
+Approved
+Rejected
+Waitlisted
+
+12. Fixture Generator
+Generate:
+Round
+Court
+Time
+Opponent
+Algorithms:
+Individual
+	•	Knockout
+	•	Double Elimination
+	•	Swiss
+
+Team
+	•	League
+	•	Group Stage
+	•	Playoff
+Inputs:
+seed
+court
+rest
+availability
+
+13. Match Management
+Fields:
+court
+players
+umpire
+schedule
+status
+Status:
+Scheduled
+Running
+Paused
+Completed
+
+14. Live Scoring Module
+Actions:
+start
+pause
+resume
+undo
+finish
+Realtime:
+Umpire
+↓
+
+Spring
+
+↓
+
+Supabase Realtime
+
+↓
+
+Users
+Scoring:
+21
+Best of 3
+Validation
+
+15. Score Correction
+Admin only.
+Rules:
+	•	Store old score
+	•	Store reason
+	•	Audit trail
+
+16. QR Check-in
+Flow:
+Open App
+↓
+
+Generate QR
+
+↓
+
+Scan
+
+↓
+
+Verify
+States:
+Registered
+Checked In
+Absent
+
+17. Notifications
+Triggers:
+Tournament:
+	•	Open
+	•	Closing
+Match:
+	•	Assigned
+	•	Starting
+Score:
+	•	Winner
+Channels:
+App
+Email
+SMS
+Push
+WhatsApp (future)
+
+18. Tournament Public Page
+URL:
+/tournament/{slug}
+Visible:
+	•	Schedule
+	•	Live Scores
+	•	Results
+	•	Gallery
+	•	Sponsors
+No login required.
+
+19. Media Gallery
+Storage:
+Supabase
+Types:
+photos
+videos
+pdf
+Permissions:
+Admin Umpire
+
+20. Dashboard
+Player
+Widgets:
+	•	Upcoming Match
+	•	QR
+	•	Rank
+
+Admin
+Widgets:
+	•	Registration
+	•	Fixtures
+	•	Courts
+	•	Revenue
+
+Umpire
+Widgets:
+	•	Assigned Match
+	•	Score Controls
+
+21. Leaderboard
+Player
+Formula:
+Win=10
+Loss=2
+Champion=20
+
+Team
+Formula:
+Tie Win
+Match Diff
+Bonus
+
+22. Database Design
+Tables
+users
+roles
+
+tournaments
+events
+
+teams
+team_players
+
+registrations
+
+fixtures
+fixture_rounds
+
+matches
+match_sets
+
+scores
+
+checkins
+
+notifications
+
+media_gallery
+
+leaderboards
+
+public_pages
+
+audit_logs
+
+23. API Design
+Auth
+POST /login
+POST /otp
+Tournament
+POST /tournaments
+GET /tournaments
+Match
+POST /match/start
+POST /score
+Leaderboard
+GET /leaderboard
+
+24. Event Driven Architecture
+Events:
+MatchStarted
+
+ScoreUpdated
+
+WinnerDeclared
+
+NotificationSent
+Consumers:
+dashboard
+
+leaderboard
+
+public_page
+
+notifications
+
+25. Security
+Controls:
+JWT
+RBAC
+Audit
+Rate Limit
+Encryption
+
+26. Non Functional Requirements
+Performance:
+<1 sec score update
+Availability:
+99.9%
+Scale:
+100k users
+
+27. Monitoring
+Metrics:
+API
+Latency
+Error
+Realtime
+Tools:
+Prometheus
+Grafana
+
+28. Testing
+Tests:
+Unit
+Integration
+Load
+E2E
+
+29. Deployment
+Frontend → Vercel
+
+Backend → Docker
+
+DB → Supabase
+
+30. Release Plan
+Phase 1
+Authentication Tournament Scoring
+
+Phase 2
+Fixture QR Notifications
+
+Phase 3
+Public Pages Gallery Leaderboards
+
+Phase 4
+AI Mobile Broadcast
+
+31. Future Enhancements
+	•	Mobile app
+	•	AI highlights
+	•	Streaming overlays
+	•	Sponsorship management
+	•	Tournament monetization
+	•	Advanced analytics
+	•	Court booking
+	•	Multi-sport support
+
+32. Open Decisions
+	•	Single DB vs Event Store
+	•	Payment integration
+	•	Team eligibility rules
+	•	Offline mode depth
+
+This version is intended to be copy-paste ready into Word as a baseline PRD.
+Next, I would create:
+	•	ER Diagram
+	•	Low-level DB schema
+	•	Spring Boot package structure
+	•	REST API specification
+	•	UI wireframes
+	•	Sequence diagrams (registration → match → score → leaderboard)
+
