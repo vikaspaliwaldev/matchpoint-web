@@ -250,6 +250,12 @@ export default function RegistrationsPage() {
   const [loading, setLoading] = useState(true);
   const [disqualifyId, setDisqualifyId] = useState<string | null>(null);
   const [disqualifyReason, setDisqualifyReason] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 25;
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterStatus, filterTournament, searchQuery]);
 
   // Import Drawer States
   const [showImportDrawer, setShowImportDrawer] = useState(false);
@@ -468,6 +474,10 @@ export default function RegistrationsPage() {
     return true;
   });
 
+  const totalItems = filtered.length;
+  const totalPages = Math.ceil(totalItems / pageSize) || 1;
+  const paginatedRegistrations = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
   // Dynamic database update with local state synchrony
   const handleStatusChange = async (id: string, status: RegistrationStatus) => {
     try {
@@ -558,7 +568,7 @@ export default function RegistrationsPage() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map(reg => {
+            {paginatedRegistrations.map(reg => {
               const tournament = tournaments.find(t => t.id === reg.tournament_id);
               const eventObj = events.find(e => e.id === reg.event_id);
               return (
@@ -698,6 +708,51 @@ export default function RegistrationsPage() {
           </tbody>
         </table>
       </div>
+
+      {/* Pagination Controls */}
+      {totalItems > 0 && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, flexWrap: 'wrap', gap: 12 }}>
+          <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+            Showing {(currentPage - 1) * pageSize + 1} to {Math.min(currentPage * pageSize, totalItems)} of {totalItems} entries
+          </span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+              disabled={currentPage === 1}
+              className="btn btn-secondary"
+              style={{ padding: '6px 12px', fontSize: 13 }}
+            >
+              Previous
+            </button>
+            {Array.from({ length: totalPages }, (_, i) => i + 1)
+              .filter(page => page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1)
+              .map((page, idx, arr) => {
+                const showEllipsisBefore = idx > 0 && page - arr[idx - 1] > 1;
+                return (
+                  <React.Fragment key={page}>
+                    {showEllipsisBefore && <span style={{ padding: '6px 8px', color: 'var(--text-muted)' }}>...</span>}
+                    <button
+                      onClick={() => setCurrentPage(page)}
+                      className={`btn ${currentPage === page ? 'btn-primary' : 'btn-secondary'}`}
+                      style={{ padding: '6px 12px', fontSize: 13, minWidth: 36 }}
+                    >
+                      {page}
+                    </button>
+                  </React.Fragment>
+                );
+              })
+            }
+            <button
+              onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+              disabled={currentPage === totalPages}
+              className="btn btn-secondary"
+              style={{ padding: '6px 12px', fontSize: 13 }}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
 
       {filtered.length === 0 && (
         <div className="empty-state" style={{ marginTop: 40 }}>

@@ -21,8 +21,10 @@ export default function PdfReportGenerator({ tournament, event, matches }: PdfRe
 
     // Group matches by round
     const matchesByRound = matches.reduce((acc, m) => {
-      if (!acc[m.fixture_round]) acc[m.fixture_round] = [];
-      acc[m.fixture_round].push(m);
+      const r = m.fixture_round;
+      if (r === undefined || r === null) return acc;
+      if (!acc[r]) acc[r] = [];
+      acc[r].push(m);
       return acc;
     }, {} as Record<number, Match[]>);
 

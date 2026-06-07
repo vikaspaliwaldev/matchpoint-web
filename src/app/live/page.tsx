@@ -8,6 +8,8 @@ import { IconShuttlecock, IconMapPin, IconCalendar, IconClock, IconActivity } fr
 import WinPredictorGauge from '@/components/WinPredictorGauge';
 import MatchCommentsSidebar from '@/components/MatchCommentsSidebar';
 import { getMatchNumber } from '@/lib/match-numbering';
+import ShuttlecockLoader from '@/components/ShuttlecockLoader';
+import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 
 export default function PublicLiveScoreboardPage() {
   const [liveMatches, setLiveMatches] = useState<Match[]>([]);
@@ -42,23 +44,84 @@ export default function PublicLiveScoreboardPage() {
 
 
   useEffect(() => {
+    // Initial fetch of data
     loadLiveData();
 
-    // Set up real-time polling interval (every 4 seconds) to fetch live points changes
-    const timer = setInterval(() => {
-      loadLiveData();
-    }, 4000);
+    if (isSupabaseConfigured) {
+      // Subscribe to real-time matches table updates
+      console.log('🔌 Connecting to Supabase Realtime for matches updates...');
+      const channel = supabase
+        .channel('live-matches-channel')
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'matches' },
+          (payload: any) => {
+            console.log('⚡ Received real-time match update:', payload.new);
+            
+            // Map keys dynamically since supabase might return camelCase or snake_case based on schema
+            const updatedMatch = {
+              id: payload.new.id,
+              tournament_id: payload.new.tournament_id || payload.new.tournamentId,
+              event_id: payload.new.event_id || payload.new.eventId,
+              fixture_round: payload.new.fixture_round !== undefined ? payload.new.fixture_round : payload.new.fixtureRound,
+              fixture_position: payload.new.fixture_position !== undefined ? payload.new.fixture_position : payload.new.fixturePosition,
+              court: payload.new.court,
+              player1_id: payload.new.player1_id || payload.new.player1Id,
+              player1_name: payload.new.player1_name || payload.new.player1Name,
+              player2_id: payload.new.player2_id || payload.new.player2Id,
+              player2_name: payload.new.player2_name || payload.new.player2Name,
+              umpire_id: payload.new.umpire_id || payload.new.umpireId,
+              umpire_name: payload.new.umpire_name || payload.new.umpireName,
+              scheduled_time: payload.new.scheduled_time || payload.new.scheduledTime,
+              actual_start_time: payload.new.actual_start_time || payload.new.actualStartTime,
+              actual_end_time: payload.new.actual_end_time || payload.new.actualEndTime,
+              duration_seconds: payload.new.duration_seconds !== undefined ? payload.new.duration_seconds : payload.new.durationSeconds,
+              status: payload.new.status,
+              winner_id: payload.new.winner_id || payload.new.winnerId,
+              sets: payload.new.sets || [],
+              sub_matches: payload.new.sub_matches || payload.new.subMatches || [],
+              round_name: payload.new.round_name || payload.new.roundName,
+              is_adhoc: payload.new.is_adhoc !== undefined ? payload.new.is_adhoc : payload.new.isAdhoc,
+              adhoc_type: payload.new.adhoc_type || payload.new.adhocType,
+            };
 
-    return () => clearInterval(timer);
+            setAllMatches(prev => {
+              const idx = prev.findIndex(m => m.id === updatedMatch.id);
+              let nextMatches = [...prev];
+              if (idx !== -1) {
+                nextMatches[idx] = updatedMatch as Match;
+              } else {
+                nextMatches.push(updatedMatch as Match);
+              }
+              
+              // Filter active matches for scoreboard display
+              const activeMatches = nextMatches.filter(m => m.status === 'running' || m.status === 'paused');
+              setLiveMatches(activeMatches);
+              return nextMatches;
+            });
+            setLastSynced(new Date());
+          }
+        )
+        .subscribe();
+
+      return () => {
+        console.log('🔌 Disconnecting live matches realtime channel');
+        supabase.removeChannel(channel);
+      };
+    } else {
+      // Fall back to polling for local mock data mode
+      console.log('🔄 Supabase not configured. Running live scoreboard in polling mock mode...');
+      const timer = setInterval(() => {
+        loadLiveData();
+      }, 4000);
+      return () => clearInterval(timer);
+    }
   }, []);
 
   if (loading && liveMatches.length === 0) {
     return (
       <div style={{ background: 'var(--bg-primary)', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
-          <div className="animate-spin" style={{ display: 'inline-block', fontSize: 24, marginBottom: 12, animation: 'spin 2s linear infinite' }}>🔄</div>
-          <p style={{ fontSize: 15, fontWeight: 500 }}>Connecting to court scoreboard...</p>
-        </div>
+        <ShuttlecockLoader message="Connecting to court scoreboard..." />
       </div>
     );
   }

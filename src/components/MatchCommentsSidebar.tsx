@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { MatchComment } from '@/types';
 import { getMatchComments, postMatchComment, deleteMatchComment } from '@/lib/supabase-service';
 import { useAuth } from '@/lib/auth-context';
+import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 
 interface MatchCommentsSidebarProps {
   matchId: string;
@@ -17,7 +18,6 @@ export default function MatchCommentsSidebar({ matchId }: MatchCommentsSidebarPr
   const [error, setError] = useState('');
   const feedEndRef = useRef<HTMLDivElement>(null);
 
-  // Poll comments list every 4 seconds
   useEffect(() => {
     let active = true;
     
@@ -29,17 +29,62 @@ export default function MatchCommentsSidebar({ matchId }: MatchCommentsSidebarPr
           setLoading(false);
         }
       } catch (err) {
-        console.error('Failed to poll comments:', err);
+        console.error('Failed to load initial comments:', err);
       }
     }
 
     fetchComments();
-    const interval = setInterval(fetchComments, 4000);
 
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
+    if (isSupabaseConfigured) {
+      console.log(`🔌 Connecting to Supabase Realtime for comments on match: ${matchId}`);
+      
+      const channel = supabase
+        .channel(`match-comments-${matchId}`)
+        .on(
+          'postgres_changes',
+          { 
+            event: 'INSERT', 
+            schema: 'public', 
+            table: 'match_comments', 
+            filter: `match_id=eq.${matchId}` 
+          },
+          (payload: any) => {
+            console.log('⚡ Received real-time comment insert:', payload.new);
+            const newComment: MatchComment = {
+              id: payload.new.id,
+              match_id: payload.new.match_id || payload.new.matchId,
+              user_id: payload.new.user_id || payload.new.userId || undefined,
+              user_name: payload.new.user_name || payload.new.userName,
+              message: payload.new.message,
+              created_at: payload.new.created_at || payload.new.createdAt,
+            };
+            if (active) {
+              setComments(prev => {
+                // Prevent duplicate insertions
+                if (prev.some(c => c.id === newComment.id)) {
+                  return prev;
+                }
+                return [...prev, newComment];
+              });
+            }
+          }
+        )
+        .subscribe();
+
+      return () => {
+        active = false;
+        console.log(`🔌 Disconnecting comments realtime channel for match: ${matchId}`);
+        supabase.removeChannel(channel);
+      };
+    } else {
+      // Fall back to polling for mock mode
+      console.log('🔄 Supabase not configured. Running comments feed in polling mock mode...');
+      const interval = setInterval(fetchComments, 4000);
+      return () => {
+        active = false;
+        clearInterval(interval);
+      };
+    }
   }, [matchId]);
 
   // Scroll to bottom on new comments

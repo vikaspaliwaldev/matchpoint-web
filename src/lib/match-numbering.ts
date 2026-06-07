@@ -4,7 +4,7 @@ import { Match } from '@/types';
  * Calculates a stable chronological sequence number (Match 1, Match 2, Match 3, etc.)
  * for a match within its specific event category.
  */
-export function getMatchNumber(matchId: string, eventId: string, allMatches: Match[]): number {
+export function getMatchNumber(matchId: string, eventId: string | undefined, allMatches: Match[]): number {
   if (!matchId || !eventId || !Array.isArray(allMatches)) return 1;
 
   const eventMatches = allMatches

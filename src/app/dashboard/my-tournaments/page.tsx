@@ -2,10 +2,11 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { getTournaments, getEvents, getPlayerRegistrations, createRegistration, getAllProfiles } from '@/lib/supabase-service';
+import { getTournaments, getEvents, getPlayerRegistrations, createRegistration, getAllProfiles, getCheckoutSessionUrl } from '@/lib/supabase-service';
 import { useAuth } from '@/lib/auth-context';
-import { IconCalendar, IconMapPin, IconTrophy, IconCheck } from '@/components/icons';
+import { IconCalendar, IconMapPin, IconTrophy, IconCheck, IconChevronDown, IconChevronRight } from '@/components/icons';
 import { Tournament, TournamentEvent, Registration } from '@/types';
+import ShuttlecockLoader from '@/components/ShuttlecockLoader';
 
 export default function MyTournamentsPage() {
   const { user } = useAuth();
@@ -14,6 +15,8 @@ export default function MyTournamentsPage() {
   const [registrations, setRegistrations] = useState<Registration[]>([]);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [expandedTourId, setExpandedTourId] = useState<string | null>(null);
 
   // Doubles partner modal state
   const [partnerModalOpen, setPartnerModalOpen] = useState(false);
@@ -43,7 +46,7 @@ export default function MyTournamentsPage() {
           getPlayerRegistrations(userId),
           getAllProfiles()
         ]);
-        setTournaments(toursData.filter(t => t.status === 'open' || t.status === 'live'));
+        setTournaments(toursData);
         setEvents(eventsData);
         setRegistrations(regsData);
         setProfiles(profilesData);
@@ -139,6 +142,13 @@ export default function MyTournamentsPage() {
       }
     }
 
+    const tournament = tournaments.find(t => t.id === tournamentId);
+    if (tournament?.collects_fees && !tournament.stripe_account_id) {
+      setToast('Ineligible: Tournament collects entry fees but Stripe payouts are not set up by the organizer.');
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+
     try {
       setSubmittingRegistration(true);
       const newReg: Registration = {
@@ -154,6 +164,15 @@ export default function MyTournamentsPage() {
       
       await createRegistration(newReg);
       setRegistrations(prev => [...prev, newReg]);
+
+      if (tournament?.collects_fees && tournament.entry_fee && tournament.entry_fee > 0) {
+        setToast('Redirecting to secure entry fee checkout...');
+        sessionStorage.setItem('pending_registration_id', newReg.id);
+        const checkoutUrl = await getCheckoutSessionUrl(newReg.id);
+        window.location.href = checkoutUrl;
+        return;
+      }
+
       setToast('Registration submitted! Awaiting approval.');
     } catch (err: any) {
       console.error(err);
@@ -219,6 +238,13 @@ export default function MyTournamentsPage() {
       }
     }
 
+    const tournament = tournaments.find(t => t.id === activeRegTourId);
+    if (tournament?.collects_fees && !tournament.stripe_account_id) {
+      setToast('Ineligible: Tournament collects entry fees but Stripe payouts are not set up by the organizer.');
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+
     // Submit Doubles Registration
     try {
       setSubmittingRegistration(true);
@@ -239,6 +265,15 @@ export default function MyTournamentsPage() {
 
       await createRegistration(newReg);
       setRegistrations(prev => [...prev, newReg]);
+
+      if (tournament?.collects_fees && tournament.entry_fee && tournament.entry_fee > 0) {
+        setToast('Redirecting to secure entry fee checkout...');
+        sessionStorage.setItem('pending_registration_id', newReg.id);
+        const checkoutUrl = await getCheckoutSessionUrl(newReg.id);
+        window.location.href = checkoutUrl;
+        return;
+      }
+
       setToast('Doubles registration submitted! Awaiting approval.');
       setPartnerModalOpen(false);
     } catch (err: any) {
@@ -299,11 +334,33 @@ export default function MyTournamentsPage() {
     return { eligible: true };
   };
 
+  // Search & Sorting Business Logic
+  const searchedTournaments = tournaments.filter(t => {
+    const q = searchQuery.toLowerCase();
+    return (
+      t.name.toLowerCase().includes(q) ||
+      (t.location && t.location.toLowerCase().includes(q)) ||
+      (t.description && t.description.toLowerCase().includes(q)) ||
+      t.status.toLowerCase().includes(q)
+    );
+  });
+
+  // Sort upcoming in ascending start_date order.
+  const upcomingTours = searchedTournaments
+    .filter(t => t.status === 'open' || t.status === 'live' || t.status === 'draft')
+    .sort((a, b) => new Date(a.start_date).getTime() - new Date(b.start_date).getTime());
+
+  // Sort past in descending start_date order.
+  const pastTours = searchedTournaments
+    .filter(t => t.status === 'completed' || t.status === 'cancelled')
+    .sort((a, b) => new Date(b.start_date).getTime() - new Date(a.start_date).getTime());
+
+  const displayedTournaments = [...upcomingTours, ...pastTours];
+
   if (loading) {
     return (
-      <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-secondary)' }}>
-        <div className="animate-spin" style={{ display: 'inline-block', fontSize: 24, marginBottom: 12, animation: 'spin 2s linear infinite' }}>🔄</div>
-        <p style={{ fontSize: 15, fontWeight: 500 }}>Loading open tournaments...</p>
+      <div className="glass-card" style={{ padding: 48 }}>
+        <ShuttlecockLoader message="Loading open tournaments..." />
       </div>
     );
   }
@@ -311,194 +368,280 @@ export default function MyTournamentsPage() {
   return (
     <div>
       <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 4 }}>Browse Tournaments</h1>
-      <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 24 }}>Register for open tournaments</p>
+      <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 24 }}>Search and register for open tournaments, or review past results</p>
+
+      {/* Search Input Bar */}
+      <div style={{ marginBottom: 24, display: 'flex', gap: 12, alignItems: 'center' }}>
+        <input
+          type="text"
+          placeholder="Search tournaments by name, location, description, or status..."
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          className="input"
+          style={{ width: '100%', maxWidth: 480, height: 40 }}
+        />
+        {searchQuery && (
+          <button
+            onClick={() => setSearchQuery('')}
+            className="btn btn-ghost btn-sm"
+            style={{ padding: '0 12px', height: 40 }}
+          >
+            Clear
+          </button>
+        )}
+      </div>
 
       <div style={{ display: 'grid', gap: 20 }}>
-        {tournaments.map(t => {
-          const tournamentEvents = events.filter(e => e.tournament_id === t.id);
-          return (
-            <div key={t.id} className="glass-card" style={{ overflow: 'hidden' }}>
-              <div style={{
-                height: 80,
-                background: t.status === 'live'
-                  ? 'linear-gradient(135deg, #6366f1, #8b5cf6)'
-                  : 'linear-gradient(135deg, #3b82f6, #06b6d4)',
-                display: 'flex',
-                alignItems: 'center',
-                padding: '0 24px',
-                gap: 12,
-              }}>
-                <IconTrophy size={28} />
-                <div>
-                  <h2 style={{ fontSize: 18, fontWeight: 700 }}>{t.name}</h2>
-                  <div style={{ fontSize: 12, opacity: 0.8 }}>{t.location}</div>
-                </div>
-                {t.status === 'live' && (
-                  <span className="badge badge-live" style={{ marginLeft: 'auto' }}>
-                    <span className="live-dot" style={{ width: 5, height: 5 }} /> Live
-                  </span>
-                )}
-              </div>
-              <div style={{ padding: '20px 24px' }}>
-                <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16 }}>{t.description}</p>
-                <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--text-muted)', marginBottom: 16 }}>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <IconCalendar size={14} />
-                    {new Date(t.start_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
-                  </span>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                    <IconMapPin size={14} /> {t.location.split(',')[0]}
-                  </span>
+        {displayedTournaments.length > 0 ? (
+          displayedTournaments.map(t => {
+            const tournamentEvents = events.filter(e => e.tournament_id === t.id);
+            const isExpanded = expandedTourId === t.id;
+            return (
+              <div
+                key={t.id}
+                className="glass-card"
+                style={{
+                  overflow: 'hidden',
+                  border: isExpanded ? '1px solid var(--accent)' : '1px solid var(--border)',
+                  transition: 'border-color 0.2s'
+                }}
+              >
+                {/* Header: Click to Expand */}
+                <div
+                  style={{
+                    height: 80,
+                    background: t.status === 'live'
+                      ? 'linear-gradient(135deg, #6366f1, #8b5cf6)'
+                      : t.status === 'completed'
+                      ? 'linear-gradient(135deg, #1e293b, #334155)'
+                      : t.status === 'cancelled'
+                      ? 'linear-gradient(135deg, #ef444420, #ef444440)'
+                      : 'linear-gradient(135deg, #3b82f6, #06b6d4)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    padding: '0 24px',
+                    gap: 12,
+                    cursor: 'pointer',
+                    userSelect: 'none'
+                  }}
+                  onClick={() => setExpandedTourId(isExpanded ? null : t.id)}
+                >
+                  <IconTrophy size={28} style={{ color: t.status === 'cancelled' ? 'var(--score-loss)' : '#ffffff', flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <h2 style={{
+                      fontSize: 18,
+                      fontWeight: 700,
+                      margin: 0,
+                      color: '#ffffff',
+                      textDecoration: t.status === 'cancelled' ? 'line-through' : 'none',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis'
+                    }}>
+                      {t.name}
+                    </h2>
+                    <div style={{ fontSize: 12, color: 'rgba(255, 255, 255, 0.9)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      📍 {t.location}
+                    </div>
+                  </div>
+                  
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+                    <span className="badge" style={{
+                      fontSize: 10,
+                      textTransform: 'uppercase',
+                      background: 'rgba(255, 255, 255, 0.2)',
+                      color: '#ffffff',
+                      border: '1px solid rgba(255, 255, 255, 0.25)'
+                    }}>
+                      {t.status}
+                    </span>
+                    <div style={{ color: '#ffffff' }}>
+                      {isExpanded ? <IconChevronDown size={20} /> : <IconChevronRight size={20} />}
+                    </div>
+                  </div>
                 </div>
 
-                {/* Events to register */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {t.type === 'team' ? (
-                    (() => {
-                      const teamEvent = tournamentEvents.find(e => e.category === 'TEAM') || tournamentEvents[0];
-                      if (!teamEvent) return <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No registration events available</div>;
-                      
-                      const isRegistered = user && registrations.some(
-                        r => r.player_id === user.id && r.tournament_id === t.id
-                      );
-                      const eligibility = checkEligibility(teamEvent);
-
-                      return (
-                        <div style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          padding: '12px 16px',
-                          borderRadius: 'var(--radius-md)',
-                          background: 'var(--bg-secondary)',
-                          border: '1px solid var(--border)',
-                        }}>
-                          <div>
-                            <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--accent)' }}>📋 Team Tournament Roster Entry</span>
-                            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                              Register to join the pool of players. The tournament administrator or team captains can assign you to a team.
-                            </div>
-                            {!eligibility.eligible && eligibility.reason && (
-                              <div style={{ fontSize: 11, color: 'var(--score-loss)', marginTop: 4, fontWeight: 500 }}>
-                                ⚠️ Ineligible: {eligibility.reason}
-                              </div>
-                            )}
-                          </div>
-                          {isRegistered ? (
-                            <span className="btn btn-sm" style={{ background: 'rgba(34, 197, 94, 0.1)', color: 'var(--score-win)', border: 'none', cursor: 'default' }}>
-                              <IconCheck size={14} /> Registered
-                            </span>
-                          ) : eligibility.needsProfileUpdate ? (
-                            <button
-                              className="btn btn-sm"
-                              onClick={() => handleRegister(t.id, teamEvent.id)}
-                              style={{ background: 'var(--warning)', color: '#fff', border: 'none' }}
-                            >
-                              Complete Profile
-                            </button>
-                          ) : !eligibility.eligible ? (
-                            <button
-                              className="btn btn-sm"
-                              disabled
-                              style={{ background: 'var(--border)', color: 'var(--text-muted)', border: 'none', cursor: 'not-allowed' }}
-                            >
-                              Ineligible
-                            </button>
-                          ) : (
-                            <button
-                              className="btn btn-primary btn-sm"
-                              onClick={() => handleRegister(t.id, teamEvent.id)}
-                            >
-                              Register to Roster
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })()
-                  ) : (
-                    tournamentEvents.map(ev => {
-                      const isRegistered = user && registrations.some(
-                        r => r.player_id === user.id && r.event_id === ev.id
-                      );
-                      const genderBadge = ev.gender_restriction && ev.gender_restriction !== 'open' ? (
-                        <span className="badge badge-accent" style={{ textTransform: 'capitalize', fontSize: 10, padding: '2px 6px', marginLeft: 8 }}>
-                          {ev.gender_restriction}
+                {/* Collapsible Details Panel */}
+                <div style={{
+                  maxHeight: isExpanded ? '2500px' : '0px',
+                  overflow: 'hidden',
+                  transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+                  background: 'var(--bg-primary)'
+                }}>
+                  <div style={{ padding: '20px 24px', borderTop: '1px solid var(--border)' }}>
+                    <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.5 }}>
+                      {t.description || 'No description provided.'}
+                    </p>
+                    
+                    <div style={{ display: 'flex', gap: 24, fontSize: 13, color: 'var(--text-muted)', marginBottom: 20, flexWrap: 'wrap' }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <IconCalendar size={14} />
+                        <strong>Dates:</strong> {new Date(t.start_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })} — {new Date(t.end_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                      </span>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <IconMapPin size={14} />
+                        <strong>Venue:</strong> {t.location}
+                      </span>
+                      {t.collects_fees && (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#34d399', fontWeight: 600 }}>
+                          🪙 Entry Fee: {new Intl.NumberFormat('en-US', { style: 'currency', currency: t.currency || 'INR' }).format(t.entry_fee || 0)}
                         </span>
-                      ) : null;
-                      const ageBadge = ev.age_limit && ev.age_limit > 0 ? (
-                        <span className="badge badge-open" style={{ fontSize: 10, padding: '2px 6px', marginLeft: 6 }}>
-                          {ev.age_restriction_type === 'min' ? `${ev.age_limit}+` : `U${ev.age_limit}`}
-                        </span>
-                      ) : null;
+                      )}
+                    </div>
 
-                      const eligibility = checkEligibility(ev);
+                    {/* Events to register */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {t.type === 'team' ? (
+                        (() => {
+                          const teamEvent = tournamentEvents.find(e => e.category === 'TEAM') || tournamentEvents[0];
+                          if (!teamEvent) return <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No registration events available</div>;
+                          
+                          const isRegistered = user && registrations.some(
+                            r => r.player_id === user.id && r.tournament_id === t.id
+                          );
+                          const eligibility = checkEligibility(teamEvent);
 
-                      return (
-                        <div key={ev.id} style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          padding: '10px 14px',
-                          borderRadius: 'var(--radius-md)',
-                          background: 'var(--bg-secondary)',
-                          border: '1px solid var(--border)',
-                        }}>
-                          <div>
-                            <span style={{ fontWeight: 500, fontSize: 14 }}>{ev.event_name}</span>
-                            {genderBadge}
-                            {ageBadge}
-                            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                              {ev.registrations_count || 0}/{ev.entry_limit} entries · {ev.format}
-                            </div>
-                            {!eligibility.eligible && eligibility.reason && (
-                              <div style={{ fontSize: 11, color: 'var(--score-loss)', marginTop: 4, fontWeight: 500 }}>
-                                ⚠️ Ineligible: {eligibility.reason}
+                          return (
+                            <div style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: '12px 16px',
+                              borderRadius: 'var(--radius-md)',
+                              background: 'var(--bg-secondary)',
+                              border: '1px solid var(--border)',
+                            }}>
+                              <div>
+                                <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--accent)' }}>📋 Team Tournament Roster Entry</span>
+                                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                                  Register to join the pool of players. The tournament administrator or team captains can assign you to a team.
+                                </div>
+                                {!eligibility.eligible && eligibility.reason && (
+                                  <div style={{ fontSize: 11, color: 'var(--score-loss)', marginTop: 4, fontWeight: 500 }}>
+                                    ⚠️ Ineligible: {eligibility.reason}
+                                  </div>
+                                )}
                               </div>
-                            )}
-                          </div>
-                          {isRegistered ? (
-                            <span className="btn btn-sm" style={{ background: 'rgba(34, 197, 94, 0.1)', color: 'var(--score-win)', border: 'none', cursor: 'default' }}>
-                              <IconCheck size={14} /> Registered
+                              {isRegistered ? (
+                                <span className="btn btn-sm" style={{ background: 'rgba(34, 197, 94, 0.1)', color: 'var(--score-win)', border: 'none', cursor: 'default' }}>
+                                  <IconCheck size={14} /> Registered
+                                </span>
+                              ) : eligibility.needsProfileUpdate ? (
+                                <button
+                                  className="btn btn-sm"
+                                  onClick={() => handleRegister(t.id, teamEvent.id)}
+                                  style={{ background: 'var(--warning)', color: '#fff', border: 'none' }}
+                                >
+                                  Complete Profile
+                                </button>
+                              ) : !eligibility.eligible ? (
+                                <button
+                                  className="btn btn-sm"
+                                  disabled
+                                  style={{ background: 'var(--border)', color: 'var(--text-muted)', border: 'none', cursor: 'not-allowed' }}
+                                >
+                                  Ineligible
+                                </button>
+                              ) : (
+                                <button
+                                  className="btn btn-primary btn-sm"
+                                  onClick={() => handleRegister(t.id, teamEvent.id)}
+                                >
+                                  Register to Roster
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })()
+                      ) : (
+                        tournamentEvents.map(ev => {
+                          const isRegistered = user && registrations.some(
+                            r => r.player_id === user.id && r.event_id === ev.id
+                          );
+                          const genderBadge = ev.gender_restriction && ev.gender_restriction !== 'open' ? (
+                            <span className="badge badge-accent" style={{ textTransform: 'capitalize', fontSize: 10, padding: '2px 6px', marginLeft: 8 }}>
+                              {ev.gender_restriction}
                             </span>
-                          ) : eligibility.needsProfileUpdate ? (
-                            <button
-                              className="btn btn-sm"
-                              onClick={() => handleRegister(t.id, ev.id)}
-                              style={{ background: 'var(--warning)', color: '#fff', border: 'none' }}
-                            >
-                              Complete Profile
-                            </button>
-                          ) : !eligibility.eligible ? (
-                            <button
-                              className="btn btn-sm"
-                              disabled
-                              style={{ background: 'var(--border)', color: 'var(--text-muted)', border: 'none', cursor: 'not-allowed' }}
-                            >
-                              Ineligible
-                            </button>
-                          ) : (
-                            <button
-                              className="btn btn-primary btn-sm"
-                              onClick={() => handleRegister(t.id, ev.id)}
-                            >
-                              Register
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
+                          ) : null;
+                          const ageBadge = ev.age_limit && ev.age_limit > 0 ? (
+                            <span className="badge badge-open" style={{ fontSize: 10, padding: '2px 6px', marginLeft: 6 }}>
+                              {ev.age_restriction_type === 'min' ? `${ev.age_limit}+` : `U${ev.age_limit}`}
+                            </span>
+                          ) : null;
 
-                <div style={{ marginTop: 12 }}>
-                  <Link href={`/tournament/${t.slug}`} className="btn btn-ghost btn-sm">
-                    View Public Page →
-                  </Link>
+                          const eligibility = checkEligibility(ev);
+
+                          return (
+                            <div key={ev.id} style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              padding: '12px 16px',
+                              borderRadius: 'var(--radius-md)',
+                              background: 'var(--bg-secondary)',
+                              border: '1px solid var(--border)',
+                            }}>
+                              <div>
+                                <span style={{ fontWeight: 600, fontSize: 14 }}>🏸 {ev.event_name}</span>
+                                {genderBadge}
+                                {ageBadge}
+                                {!eligibility.eligible && eligibility.reason && (
+                                  <div style={{ fontSize: 11, color: 'var(--score-loss)', marginTop: 4, fontWeight: 500 }}>
+                                    ⚠️ Ineligible: {eligibility.reason}
+                                  </div>
+                                )}
+                              </div>
+                              {isRegistered ? (
+                                <span className="btn btn-sm" style={{ background: 'rgba(34, 197, 94, 0.1)', color: 'var(--score-win)', border: 'none', cursor: 'default' }}>
+                                  <IconCheck size={14} /> Registered
+                                </span>
+                              ) : eligibility.needsProfileUpdate ? (
+                                <button
+                                  className="btn btn-sm"
+                                  onClick={() => handleRegister(t.id, ev.id)}
+                                  style={{ background: 'var(--warning)', color: '#fff', border: 'none' }}
+                                >
+                                  Complete Profile
+                                </button>
+                              ) : !eligibility.eligible ? (
+                                <button
+                                  className="btn btn-sm"
+                                  disabled
+                                  style={{ background: 'var(--border)', color: 'var(--text-muted)', border: 'none', cursor: 'not-allowed' }}
+                                >
+                                  Ineligible
+                                </button>
+                              ) : (
+                                <button
+                                  className="btn btn-primary btn-sm"
+                                  onClick={() => handleRegister(t.id, ev.id)}
+                                >
+                                  Register
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+                      <Link href={`/tournament/${t.slug || t.id}`} className="btn btn-ghost btn-sm" style={{ padding: 0 }}>
+                        View Public Page →
+                      </Link>
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })
+        ) : (
+          <div className="empty-state" style={{ padding: 40 }}>
+            <div className="empty-state-icon">🏆</div>
+            <p style={{ fontSize: 15, fontWeight: 500 }}>No tournaments found</p>
+            <p style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Try adjusting your search criteria.</p>
+          </div>
+        )}
       </div>
 
       {/* Doubles Partner Details Modal */}

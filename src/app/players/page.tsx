@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { Match, User, TournamentEvent, Tournament } from '@/types';
 import { getLeaderboard, getMatches, getEvents, getTournaments } from '@/lib/supabase-service';
 import { IconShuttlecock, IconTrophy, IconActivity, IconUsers, IconX, IconClock } from '@/components/icons';
+import ShuttlecockLoader from '@/components/ShuttlecockLoader';
 import { getPlayerAchievements } from '@/lib/achievements';
 import { generateMatchHighlights } from '@/lib/highlights';
 
@@ -347,6 +348,13 @@ export default function PlayersPublicLeaderboardPage() {
   const [playerBId, setPlayerBId] = useState('');
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
 
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 10;
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, leaderboardTab, selectedAgeCat, selectedEventType, selectedGender, selectedTourIds]);
+
   const loadData = async () => {
     try {
       setLoading(true);
@@ -388,12 +396,13 @@ export default function PlayersPublicLeaderboardPage() {
 
       const playerMatches = matches.filter(m => {
         if (m.status !== 'completed') return false;
+        if (m.is_adhoc) return false;
 
         // Filter by selected Tournaments if any are selected
-        if (selectedTourIds.length > 0 && !selectedTourIds.includes(m.tournament_id)) return false;
+        if (selectedTourIds.length > 0 && (!m.tournament_id || !selectedTourIds.includes(m.tournament_id))) return false;
 
         // Find the event for this match to apply Category/Age/Gender criteria
-        const matchEvent = events.find(e => e.id === m.event_id);
+        const matchEvent = m.event_id ? events.find(e => e.id === m.event_id) : undefined;
         if (!matchEvent) return false;
 
         // Filter by Event Type
@@ -444,7 +453,7 @@ export default function PlayersPublicLeaderboardPage() {
 
       const winRate = played > 0 ? Math.round((wins / played) * 1000.0) / 10.0 : 0.0;
       // Compute championships based on category finals won
-      const championshipsCount = playerMatches.filter(m => m.fixture_round >= 4 && (m.winner_id === pId || (m.winner_id && (m.winner_id === m.player1_id ? m.player1_name : m.player2_name).toLowerCase().includes(pNameLower)))).length;
+      const championshipsCount = playerMatches.filter(m => (m.fixture_round ?? 0) >= 4 && (m.winner_id === pId || (m.winner_id && (m.winner_id === m.player1_id ? m.player1_name : m.player2_name).toLowerCase().includes(pNameLower)))).length;
       const points = (wins * 10) + (losses * 2);
 
       // Extract partner name if we are on the doubles tab
@@ -495,6 +504,12 @@ export default function PlayersPublicLeaderboardPage() {
     r.playerEmail.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const totalItems = filteredBoard.length;
+  const totalPages = Math.ceil(totalItems / pageSize) || 1;
+  const paginatedBoard = React.useMemo(() => {
+    return filteredBoard.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  }, [filteredBoard, currentPage]);
+
   const playerA = displayLeaderboard.find(r => r.playerId === playerAId);
   const playerB = displayLeaderboard.find(r => r.playerId === playerBId);
 
@@ -504,6 +519,7 @@ export default function PlayersPublicLeaderboardPage() {
 
   const directMatches = matches.filter(m => {
     if (m.status !== 'completed') return false;
+    if (m.is_adhoc) return false;
 
     const hasA = m.player1_id === playerAId || m.player2_id === playerAId || 
                  (nameA && (m.player1_name.toLowerCase().includes(nameA) || m.player2_name.toLowerCase().includes(nameA)));
@@ -532,10 +548,7 @@ export default function PlayersPublicLeaderboardPage() {
   if (loading && leaderboard.length === 0) {
     return (
       <div style={{ background: 'var(--bg-primary)', minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
-          <div className="animate-spin" style={{ display: 'inline-block', fontSize: 24, marginBottom: 12, animation: 'spin 2s linear infinite' }}>🔄</div>
-          <p style={{ fontSize: 15, fontWeight: 500 }}>Fetching league standings...</p>
-        </div>
+        <ShuttlecockLoader message="Fetching league standings..." />
       </div>
     );
   }
@@ -717,8 +730,8 @@ export default function PlayersPublicLeaderboardPage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredBoard.map((row, idx) => {
-                  const rank = idx + 1;
+                {paginatedBoard.map((row, idx) => {
+                  const rank = (currentPage - 1) * pageSize + idx + 1;
                   const isPodium = rank <= 3;
                   const podiumEmoji = rank === 1 ? '🥇' : rank === 2 ? '🥈' : '🥉';
                   
@@ -771,6 +784,51 @@ export default function PlayersPublicLeaderboardPage() {
               </tbody>
             </table>
           </div>
+
+          {/* Pagination Controls */}
+          {totalItems > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, flexWrap: 'wrap', gap: 12 }}>
+              <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                Showing {(currentPage - 1) * pageSize + 1} to {Math.min(currentPage * pageSize, totalItems)} of {totalItems} entries
+              </span>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+                  disabled={currentPage === 1}
+                  className="btn btn-secondary"
+                  style={{ padding: '6px 12px', fontSize: 13 }}
+                >
+                  Previous
+                </button>
+                {Array.from({ length: totalPages }, (_, i) => i + 1)
+                  .filter(page => page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1)
+                  .map((page, idx, arr) => {
+                    const showEllipsisBefore = idx > 0 && page - arr[idx - 1] > 1;
+                    return (
+                      <React.Fragment key={page}>
+                        {showEllipsisBefore && <span style={{ padding: '6px 8px', color: 'var(--text-muted)' }}>...</span>}
+                        <button
+                          onClick={() => setCurrentPage(page)}
+                          className={`btn ${currentPage === page ? 'btn-primary' : 'btn-secondary'}`}
+                          style={{ padding: '6px 12px', fontSize: 13, minWidth: 36 }}
+                        >
+                          {page}
+                        </button>
+                      </React.Fragment>
+                    );
+                  })
+                }
+                <button
+                  onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+                  disabled={currentPage === totalPages}
+                  className="btn btn-secondary"
+                  style={{ padding: '6px 12px', fontSize: 13 }}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Head-to-Head Comparison Section - NOW ON BOTTOM! */}

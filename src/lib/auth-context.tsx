@@ -47,6 +47,7 @@ function mapProfileToUser(data: any): User {
     phone: data.phone,
     age: data.age,
     gender: data.gender,
+    avatar: data.avatar,
     date_of_birth: data.dateOfBirth || data.date_of_birth || undefined,
     role: data.roles && data.roles.includes('admin') ? 'admin' : (data.roles && data.roles.includes('umpire') ? 'umpire' : 'player'),
     roles: data.roles || ['player'],
@@ -89,10 +90,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!token || !user) return;
 
     try {
-      const res = await fetch(`${API_BASE_URL}/api/v1/profiles/${user.id}`, {
+      const res = await fetch(`${API_BASE_URL}/api/v1/profiles/${user.id}?t=${Date.now()}`, {
         headers: { 
           'Authorization': `Bearer ${token}`,
-          'bypass-tunnel-reminder': 'true'
+          'bypass-tunnel-reminder': 'true',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
         }
       });
       if (res.ok) {
@@ -104,6 +107,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.error('Failed to refresh profile:', err);
     }
   }, [user]);
+
+  // Keep-alive scheduler for Render backend service (pings /ping every 10 min)
+  React.useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    const pingBackend = async () => {
+      try {
+        await fetch(`${API_BASE_URL}/api/v1/ping`, {
+          headers: { 'bypass-tunnel-reminder': 'true' }
+        });
+      } catch (e) {
+        // Fail silently
+      }
+    };
+    pingBackend();
+    const interval = setInterval(pingBackend, 10 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   React.useEffect(() => {
     const token = typeof window !== 'undefined' ? localStorage.getItem('matchpoint_token') : null;

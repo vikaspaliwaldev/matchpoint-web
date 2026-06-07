@@ -10,6 +10,12 @@ export default function AuditLogsPage() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'all' | 'tournament' | 'event' | 'registration' | 'match' | 'team'>('all');
   const [search, setSearch] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 10;
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, activeTab]);
 
   useEffect(() => {
     async function loadData() {
@@ -38,6 +44,10 @@ export default function AuditLogsPage() {
     }
     return true;
   });
+
+  const totalItems = filteredLogs.length;
+  const totalPages = Math.ceil(totalItems / pageSize) || 1;
+  const paginatedLogs = filteredLogs.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   const categories = ['all', 'tournament', 'event', 'registration', 'match', 'team'] as const;
 
@@ -100,7 +110,7 @@ export default function AuditLogsPage() {
               </tr>
             </thead>
             <tbody>
-              {filteredLogs.map(log => {
+              {paginatedLogs.map(log => {
                 const logTime = new Date(log.created_at).toLocaleString('en-IN', {
                   dateStyle: 'medium',
                   timeStyle: 'medium'
@@ -147,6 +157,51 @@ export default function AuditLogsPage() {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination Controls */}
+        {totalItems > 0 && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, padding: '0 20px 20px 20px', flexWrap: 'wrap', gap: 12 }}>
+            <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+              Showing {(currentPage - 1) * pageSize + 1} to {Math.min(currentPage * pageSize, totalItems)} of {totalItems} entries
+            </span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button
+                onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+                disabled={currentPage === 1}
+                className="btn btn-secondary"
+                style={{ padding: '6px 12px', fontSize: 13 }}
+              >
+                Previous
+              </button>
+              {Array.from({ length: totalPages }, (_, i) => i + 1)
+                .filter(page => page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1)
+                .map((page, idx, arr) => {
+                  const showEllipsisBefore = idx > 0 && page - arr[idx - 1] > 1;
+                  return (
+                    <React.Fragment key={page}>
+                      {showEllipsisBefore && <span style={{ padding: '6px 8px', color: 'var(--text-muted)' }}>...</span>}
+                      <button
+                        onClick={() => setCurrentPage(page)}
+                        className={`btn ${currentPage === page ? 'btn-primary' : 'btn-secondary'}`}
+                        style={{ padding: '6px 12px', fontSize: 13, minWidth: 36 }}
+                      >
+                        {page}
+                      </button>
+                    </React.Fragment>
+                  );
+                })
+              }
+              <button
+                onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+                disabled={currentPage === totalPages}
+                className="btn btn-secondary"
+                style={{ padding: '6px 12px', fontSize: 13 }}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
 
         {filteredLogs.length === 0 && (
           <div style={{ padding: 48, textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>

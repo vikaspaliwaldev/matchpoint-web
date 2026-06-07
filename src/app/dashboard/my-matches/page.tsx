@@ -46,9 +46,11 @@ export default function MyMatchesPage() {
     );
   }
 
-  const myMatches = matches.filter(
-    m => m.player1_id === user.id || m.player2_id === user.id
-  );
+  const myMatches = matches.filter(m => {
+    const isP1 = m.player1_id === user.id || (m.player1_id && m.player1_id.split('/').includes(user.id)) || (user.name && m.player1_name.toLowerCase().includes(user.name.toLowerCase()));
+    const isP2 = m.player2_id === user.id || (m.player2_id && m.player2_id.split('/').includes(user.id)) || (user.name && m.player2_name.toLowerCase().includes(user.name.toLowerCase()));
+    return isP1 || isP2;
+  });
 
   const liveMatches = myMatches.filter(m => m.status === 'running');
   const upcomingMatches = myMatches.filter(m => m.status === 'scheduled');

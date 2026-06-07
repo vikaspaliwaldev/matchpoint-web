@@ -56,6 +56,11 @@ export interface Tournament {
   bonus_point_value?: number;
   age_cutoff_date?: string;
   admins?: string[];
+  collects_fees?: boolean;
+  entry_fee?: number;
+  currency?: string;
+  stripe_account_id?: string;
+  platform_fee_percentage?: number;
 }
 
 // ---- Event ----
@@ -103,6 +108,8 @@ export interface Registration {
   partner_email?: string;
   partner_gender?: string;
   partner_age?: number;
+  payment_status?: string;
+  payment_method?: string;
 }
 
 // ---- Team ----
@@ -134,10 +141,10 @@ export interface TeamSubMatch {
 
 export interface Match {
   id: string;
-  tournament_id: string;
-  event_id: string;
-  fixture_round: number;
-  fixture_position: number;
+  tournament_id?: string;
+  event_id?: string;
+  fixture_round?: number;
+  fixture_position?: number;
   court?: string;
   player1_id: string;
   player1_name: string;
@@ -153,6 +160,9 @@ export interface Match {
   winner_id?: string;
   sets: MatchSet[];
   sub_matches?: TeamSubMatch[];
+  round_name?: string;
+  is_adhoc?: boolean;
+  adhoc_type?: string;
 }
 
 export interface MatchSet {

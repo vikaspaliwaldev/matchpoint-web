@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useAuth } from '@/lib/auth-context';
 import { Tournament, TournamentEvent, TournamentStatus, EventCategory, EventFormat, ScoringFormat, MasterEvent, TournamentMedia, User } from '@/types';
 import CertificateBuilder from '@/components/CertificateBuilder';
+import ShuttlecockLoader from '@/components/ShuttlecockLoader';
 import {
   getTournaments,
   getEventsByTournament,
@@ -13,11 +14,13 @@ import {
   updateTournamentStatus,
   updateTournament,
   updateEvent,
+  deleteEvent,
   getMasterEvents,
   getTournamentMedia,
   uploadTournamentMedia,
   deleteTournamentMedia,
   getAllProfiles,
+  connectStripeConnect,
 } from '@/lib/supabase-service';
 import {
   IconPlus,
@@ -39,6 +42,7 @@ export default function TournamentsPage() {
   const [eventsMap, setEventsMap] = useState<Record<string, TournamentEvent[]>>({});
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState<TournamentStatus | 'all'>('all');
+  const [searchQuery, setSearchQuery] = useState('');
   const [selectedTournament, setSelectedTournament] = useState<Tournament | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<TournamentEvent | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -82,7 +86,14 @@ export default function TournamentsPage() {
     loadData();
   }, []);
 
-  const filtered = filterStatus === 'all' ? tournaments : tournaments.filter(t => t.status === filterStatus);
+  const filtered = tournaments.filter(t => {
+    const matchesStatus = filterStatus === 'all' || t.status === filterStatus;
+    const matchesSearch = searchQuery.trim() === '' ||
+      t.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (t.location && t.location.toLowerCase().includes(searchQuery.toLowerCase())) ||
+      (t.description && t.description.toLowerCase().includes(searchQuery.toLowerCase()));
+    return matchesStatus && matchesSearch;
+  });
 
   const handleCreate = async (data: Partial<Tournament>): Promise<boolean> => {
     const newT: Tournament = {
@@ -102,6 +113,9 @@ export default function TournamentsPage() {
       bonus_point_value: data.bonus_point_value,
       team_tie_configs: data.team_tie_configs,
       team_tie_events: data.team_tie_events,
+      collects_fees: data.collects_fees || false,
+      entry_fee: data.entry_fee ? Number(data.entry_fee) : 0,
+      currency: data.currency || 'INR',
     };
     try {
       await createTournament(newT, user ? { id: user.id, name: user.name } : null);
@@ -173,6 +187,16 @@ export default function TournamentsPage() {
       console.error('Failed to update tournament status:', err);
     }
   };
+  
+  const handleConnectStripe = async (tournamentId: string) => {
+    try {
+      const url = await connectStripeConnect(tournamentId);
+      window.location.href = url;
+    } catch (err: any) {
+      console.error('Failed to link Stripe Connect account:', err);
+      alert(err.message || 'Failed to initiate Stripe onboarding. Please try again.');
+    }
+  };
 
   const handleUpdateTournament = async (data: Partial<Tournament>) => {
     if (!selectedTournament) return;
@@ -205,6 +229,24 @@ export default function TournamentsPage() {
     }
   };
 
+  const handleDeleteEvent = async (eventId: string) => {
+    if (!selectedTournament) return;
+    try {
+      await deleteEvent(eventId, user ? { id: user.id, name: user.name } : null);
+      setEventsMap(prev => {
+        const list = prev[selectedTournament.id] || [];
+        const next = list.filter(e => e.id !== eventId);
+        return { ...prev, [selectedTournament.id]: next };
+      });
+      setShowEditEventModal(false);
+      setSelectedEvent(null);
+      setSelectedTournament(null);
+    } catch (err) {
+      console.error('Failed to delete event:', err);
+      alert(err instanceof Error ? err.message : 'Failed to delete event.');
+    }
+  };
+
   const getEventsForTournament = (tid: string) => eventsMap[tid] || [];
 
   return (
@@ -220,25 +262,58 @@ export default function TournamentsPage() {
         </button>
       </div>
 
-      {/* Filter Tabs */}
-      <div className="tab-group" style={{ marginBottom: 24, display: 'inline-flex' }}>
-        {(['all', 'draft', 'open', 'live', 'completed', 'cancelled'] as const).map(status => (
-          <button
-            key={status}
-            className={`tab ${filterStatus === status ? 'active' : ''}`}
-            onClick={() => setFilterStatus(status)}
-            style={{ textTransform: 'capitalize' }}
-          >
-            {status}
-          </button>
-        ))}
+      {/* Filter & Search Bar Row */}
+      <div style={{ marginBottom: 24, display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+        {/* Filter Tabs */}
+        <div className="tab-group" style={{ display: 'inline-flex' }}>
+          {(['all', 'draft', 'open', 'live', 'completed', 'cancelled'] as const).map(status => (
+            <button
+              key={status}
+              className={`tab ${filterStatus === status ? 'active' : ''}`}
+              onClick={() => setFilterStatus(status)}
+              style={{ textTransform: 'capitalize' }}
+            >
+              {status}
+            </button>
+          ))}
+        </div>
+
+        {/* Search Bar */}
+        <div style={{ flex: 1, minWidth: 260, position: 'relative' }}>
+          <input
+            type="text"
+            className="input"
+            placeholder="Search tournaments by name, location, or description..."
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            style={{ paddingRight: searchQuery ? 32 : 12, height: 38 }}
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              style={{
+                position: 'absolute',
+                right: 10,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                fontSize: 14,
+                padding: 0
+              }}
+            >
+              <IconX size={14} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Tournament List */}
       {loading ? (
-        <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-secondary)' }}>
-          <div className="animate-spin" style={{ display: 'inline-block', fontSize: 24, marginBottom: 12, animation: 'spin 2s linear infinite' }}>🔄</div>
-          <p style={{ fontSize: 15, fontWeight: 500 }}>Loading Tournaments & Events...</p>
+        <div className="glass-card" style={{ padding: 48 }}>
+          <ShuttlecockLoader message="Loading Tournaments & Events..." />
         </div>
       ) : (
         <>
@@ -285,6 +360,22 @@ export default function TournamentsPage() {
                                 🛡️ Cutoff: {new Date(t.age_cutoff_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
                               </span>
                             )}
+                            {t.collects_fees && (
+                              <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--accent)', fontWeight: 600 }}>
+                                💳 Entry Fee: {t.entry_fee} {t.currency}
+                              </span>
+                            )}
+                            {t.collects_fees && (
+                              t.stripe_account_id ? (
+                                <span style={{ color: '#22c55e', fontWeight: 600 }}>
+                                  🟢 Stripe Connected
+                                </span>
+                              ) : (
+                                <span style={{ color: '#ef4444', fontWeight: 600 }}>
+                                  ⚠️ Payouts Setup Pending
+                                </span>
+                              )
+                            )}
                           </div>
 
                           {/* Events chips with quick edit support */}
@@ -328,6 +419,13 @@ export default function TournamentsPage() {
                             📷 Manage Gallery
                           </button>
                           
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => { setSelectedTournament(t); setShowEditModal(true); }}
+                          >
+                            Edit Tournament
+                          </button>
+                          
                           {!isReadOnly && (
                             <>
                               <button
@@ -336,28 +434,79 @@ export default function TournamentsPage() {
                               >
                                 <IconPlus size={14} /> Add Event
                               </button>
-                              <button
-                                className="btn btn-ghost btn-sm"
-                                onClick={() => { setSelectedTournament(t); setShowEditModal(true); }}
-                              >
-                                Edit Tournament
-                              </button>
+                              {t.collects_fees && !t.stripe_account_id && (
+                                <button
+                                  className="btn btn-sm animate-pulse"
+                                  style={{ background: 'linear-gradient(135deg, var(--accent), #8b5cf6)', color: 'white', border: 'none', fontWeight: 600 }}
+                                  onClick={() => handleConnectStripe(t.id)}
+                                >
+                                  💳 Connect Stripe
+                                </button>
+                              )}
                             </>
                           )}
                           
                           {t.status === 'draft' && (
-                            <button className="btn btn-primary btn-sm" onClick={() => handleStatusChange(t.id, 'open')}>
-                              Open Registration
-                            </button>
+                            <>
+                              <button className="btn btn-primary btn-sm" onClick={() => handleStatusChange(t.id, 'open')}>
+                                Open Registration
+                              </button>
+                              <button
+                                className="btn btn-sm"
+                                style={{ border: '1px solid rgba(239, 68, 68, 0.4)', color: 'var(--score-loss)', background: 'rgba(239, 68, 68, 0.05)' }}
+                                onClick={() => handleStatusChange(t.id, 'cancelled')}
+                              >
+                                Cancel Tournament
+                              </button>
+                            </>
                           )}
                           {t.status === 'open' && (
-                            <button className="btn btn-primary btn-sm" style={{ background: 'var(--score-live)' }} onClick={() => handleStatusChange(t.id, 'live')}>
-                              Go Live
-                            </button>
+                            <>
+                              <button className="btn btn-primary btn-sm" style={{ background: 'var(--score-live)' }} onClick={() => handleStatusChange(t.id, 'live')}>
+                                Go Live
+                              </button>
+                              <button className="btn btn-ghost btn-sm" onClick={() => handleStatusChange(t.id, 'draft')}>
+                                Revert to Draft
+                              </button>
+                              <button
+                                className="btn btn-sm"
+                                style={{ border: '1px solid rgba(239, 68, 68, 0.4)', color: 'var(--score-loss)', background: 'rgba(239, 68, 68, 0.05)' }}
+                                onClick={() => handleStatusChange(t.id, 'cancelled')}
+                              >
+                                Cancel Tournament
+                              </button>
+                            </>
                           )}
                           {t.status === 'live' && (
-                            <button className="btn btn-secondary btn-sm" onClick={() => handleStatusChange(t.id, 'completed')}>
-                              Complete
+                            <>
+                              <button className="btn btn-secondary btn-sm" onClick={() => handleStatusChange(t.id, 'completed')}>
+                                Complete
+                              </button>
+                              <button className="btn btn-ghost btn-sm" onClick={() => handleStatusChange(t.id, 'open')}>
+                                Revert to Open
+                              </button>
+                              <button
+                                className="btn btn-sm"
+                                style={{ border: '1px solid rgba(239, 68, 68, 0.4)', color: 'var(--score-loss)', background: 'rgba(239, 68, 68, 0.05)' }}
+                                onClick={() => handleStatusChange(t.id, 'cancelled')}
+                              >
+                                Cancel Tournament
+                              </button>
+                            </>
+                          )}
+                          {t.status === 'completed' && (
+                            <>
+                              <button className="btn btn-ghost btn-sm" onClick={() => handleStatusChange(t.id, 'live')}>
+                                Revert to Live
+                              </button>
+                              <button className="btn btn-ghost btn-sm" onClick={() => handleStatusChange(t.id, 'open')}>
+                                Revert to Open
+                              </button>
+                            </>
+                          )}
+                          {t.status === 'cancelled' && (
+                            <button className="btn btn-ghost btn-sm" onClick={() => handleStatusChange(t.id, 'draft')}>
+                              Reactivate (Revert to Draft)
                             </button>
                           )}
                         </div>
@@ -408,6 +557,7 @@ export default function TournamentsPage() {
           masterEvents={masterEvents}
           onClose={() => { setShowEditEventModal(false); setSelectedEvent(null); setSelectedTournament(null); }}
           onUpdate={handleUpdateEvent}
+          onDelete={handleDeleteEvent}
         />
       )}
 
@@ -467,6 +617,9 @@ function CreateTournamentModal({
   const [bonusPointValue, setBonusPointValue] = useState(1);
   const [error, setError] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [collectsFees, setCollectsFees] = useState(false);
+  const [entryFee, setEntryFee] = useState('0');
+  const [currency, setCurrency] = useState('INR');
 
   // Initialize selectedMasterEventId when masterEvents is loaded
   useEffect(() => {
@@ -529,6 +682,9 @@ function CreateTournamentModal({
         team_tie_events: type === 'team' ? flatTieEvents : undefined,
         bonus_point_margin: type === 'team' ? Number(bonusPointMargin) : undefined,
         bonus_point_value: type === 'team' ? Number(bonusPointValue) : undefined,
+        collects_fees: collectsFees,
+        entry_fee: collectsFees ? Number(entryFee) : 0,
+        currency,
       });
     } catch (err: any) {
       setError(err.message || 'Failed to create tournament. Please ensure the name is unique.');
@@ -565,7 +721,8 @@ function CreateTournamentModal({
           {[
             { number: 1, label: 'General Info' },
             { number: 2, label: 'Schedule & Format' },
-            ...(type === 'team' ? [{ number: 3, label: 'Team Setup' }] : []),
+            { number: 3, label: 'Entry Fee Settings' },
+            ...(type === 'team' ? [{ number: 4, label: 'Team Setup' }] : []),
           ].map((s, idx) => (
             <React.Fragment key={s.number}>
               {idx > 0 && <div style={{ flex: 1, height: 2, background: step >= s.number ? 'var(--accent)' : 'var(--border)', margin: '0 8px' }} />}
@@ -665,8 +822,67 @@ function CreateTournamentModal({
             </div>
           )}
 
-          {/* Step 3: Team Configurations */}
-          {step === 3 && type === 'team' && (
+          {/* Step 3: Entry Fee Settings */}
+          {step === 3 && (
+            <div className="animate-slide-up" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <div className="input-group">
+                <label className="input-label" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={collectsFees}
+                    onChange={e => setCollectsFees(e.target.checked)}
+                    style={{ width: 18, height: 18, accentColor: 'var(--accent)' }}
+                  />
+                  <span style={{ fontSize: 14, fontWeight: 600 }}>Collect Entry Fees from Players</span>
+                </label>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 26 }}>
+                  If enabled, players will be required to pay an entry fee via Stripe during registration.
+                </span>
+              </div>
+
+              {collectsFees && (
+                <div className="animate-slide-up" style={{ display: 'flex', flexDirection: 'column', gap: 16, borderLeft: '2px solid var(--accent)', paddingLeft: 16, marginTop: 8 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                    <div className="input-group">
+                      <label className="input-label" htmlFor="t-fee">Entry Fee Amount *</label>
+                      <input
+                        id="t-fee"
+                        type="number"
+                        className="input"
+                        min="0"
+                        step="0.01"
+                        placeholder="0.00"
+                        value={entryFee}
+                        onChange={e => setEntryFee(e.target.value)}
+                        required={collectsFees}
+                      />
+                    </div>
+                    <div className="input-group">
+                      <label className="input-label" htmlFor="t-currency">Currency *</label>
+                      <select
+                        id="t-currency"
+                        className="input"
+                        value={currency}
+                        onChange={e => setCurrency(e.target.value)}
+                        style={{ height: 42 }}
+                      >
+                        <option value="INR">INR (₹)</option>
+                        <option value="USD">USD ($)</option>
+                        <option value="EUR">EUR (€)</option>
+                        <option value="GBP">GBP (£)</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', background: 'rgba(255,255,255,0.02)', padding: '10px 14px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
+                    ℹ️ **Payouts Notice**: You will need to link your Stripe account under the tournament actions in the dashboard to begin accepting registrations.
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Step 4: Team Configurations */}
+          {step === 4 && type === 'team' && (
             <div className="animate-slide-up" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <div className="input-group">
@@ -782,18 +998,24 @@ function CreateTournamentModal({
             )}
 
             {step === 2 && (
+              <button type="button" className="btn btn-primary" onClick={() => setStep(3)} disabled={!!dateError}>
+                Next: Entry Fee Settings
+              </button>
+            )}
+
+            {step === 3 && (
               type === 'team' ? (
-                <button type="button" className="btn btn-primary" onClick={() => setStep(3)} disabled={!!dateError}>
+                <button type="button" className="btn btn-primary" onClick={() => setStep(4)}>
                   Next: Configure Team Setup
                 </button>
               ) : (
-                <button type="submit" className="btn btn-primary" disabled={!!dateError || isSubmitting}>
+                <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
                   {isSubmitting ? 'Creating...' : 'Create Tournament'}
                 </button>
               )
             )}
 
-            {step === 3 && type === 'team' && (
+            {step === 4 && type === 'team' && (
               <button type="submit" className="btn btn-primary" disabled={teamTieConfigs.length === 0 || isSubmitting}>
                 {isSubmitting ? 'Creating...' : 'Create Tournament'}
               </button>
@@ -816,37 +1038,89 @@ function AddEventModal({
   onClose: () => void;
   onEventAdded: (newEvent: TournamentEvent) => void;
 }) {
-  const [selectedMasterId, setSelectedMasterId] = useState(masterEvents[0]?.id || '');
+  const [selectedMasterIds, setSelectedMasterIds] = useState<string[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [entryLimit, setEntryLimit] = useState('32');
   const [format, setFormat] = useState<EventFormat>('knockout');
   const [scoringFormat, setScoringFormat] = useState<ScoringFormat>('21-point');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Initialize selectedMasterId when masterEvents is loaded
+  const dropdownRef = React.useRef<HTMLDivElement>(null);
+
+  // Close dropdown on click outside
   useEffect(() => {
-    if (masterEvents && masterEvents.length > 0) {
-      setSelectedMasterId(masterEvents[0].id);
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsDropdownOpen(false);
+      }
     }
-  }, [masterEvents]);
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Filter events based on search query
+  const filteredEvents = masterEvents.filter(me => {
+    const q = searchQuery.toLowerCase();
+    return (
+      me.name.toLowerCase().includes(q) ||
+      me.event_type.toLowerCase().includes(q) ||
+      me.category.toLowerCase().includes(q) ||
+      me.gender.toLowerCase().includes(q)
+    );
+  });
+
+  const handleToggleSelect = (id: string) => {
+    setSelectedMasterIds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    );
+  };
+
+  const handleSelectAllFiltered = () => {
+    const idsToAdd = filteredEvents.map(e => e.id);
+    setSelectedMasterIds(prev => {
+      const union = new Set([...prev, ...idsToAdd]);
+      return Array.from(union);
+    });
+  };
+
+  const handleClearAll = () => {
+    setSelectedMasterIds([]);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedMasterId) return;
+    if (selectedMasterIds.length === 0) return;
 
-    const newEvent: TournamentEvent = {
-      id: `e${Date.now()}`,
-      tournament_id: tournament.id,
-      master_event_id: selectedMasterId,
-      entry_limit: parseInt(entryLimit),
-      format,
-      registrations_count: 0,
-      scoring_format: scoringFormat,
-    };
+    setIsSubmitting(true);
     try {
-      await createEvent(newEvent);
-      onEventAdded(newEvent);
+      // Create each event sequentially
+      for (let i = 0; i < selectedMasterIds.length; i++) {
+        const masterId = selectedMasterIds[i];
+        const master = masterEvents.find(me => me.id === masterId);
+        
+        const newEvent: TournamentEvent = {
+          id: `e${Date.now()}-${masterId}-${i}`, // unique suffix to prevent collisions
+          tournament_id: tournament.id,
+          master_event_id: masterId,
+          event_name: master ? master.name : 'Unknown Event',
+          category: master ? master.category.toUpperCase() : undefined,
+          entry_limit: parseInt(entryLimit),
+          format,
+          registrations_count: 0,
+          scoring_format: scoringFormat,
+          gender_restriction: master ? (master.gender === 'Female' ? 'women' : master.gender === 'Male' ? 'men' : 'open') : 'open',
+        };
+
+        await createEvent(newEvent);
+        onEventAdded(newEvent);
+      }
       onClose();
     } catch (err) {
-      console.error('Failed to create event:', err);
+      console.error('Failed to create event(s):', err);
+      alert('Failed to add some events. Please check connection and try again.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -862,21 +1136,231 @@ function AddEventModal({
         </div>
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           
-          <div className="input-group">
-            <label className="input-label" htmlFor="me-select">Select Event Template *</label>
-            <select
-              id="me-select"
-              className="input"
-              value={selectedMasterId}
-              onChange={e => setSelectedMasterId(e.target.value)}
-              required
-            >
-              {masterEvents.map(me => (
-                <option key={me.id} value={me.id}>
-                  {me.name} ({me.event_type.toUpperCase()} • {me.category.toUpperCase()})
-                </option>
-              ))}
-            </select>
+          <div className="input-group" style={{ position: 'relative' }} ref={dropdownRef}>
+            <label className="input-label">Select Event Template(s) *</label>
+            
+            {/* Selected Items / Chips */}
+            {selectedMasterIds.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                {selectedMasterIds.map(id => {
+                  const master = masterEvents.find(me => me.id === id);
+                  if (!master) return null;
+                  return (
+                    <span
+                      key={id}
+                      className="badge"
+                      style={{
+                        background: 'var(--accent-subtle)',
+                        color: 'var(--accent-hover)',
+                        border: '1px solid var(--border-accent)',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        textTransform: 'none',
+                        padding: '4px 8px',
+                        fontSize: '12px'
+                      }}
+                    >
+                      {master.name} ({master.category.toUpperCase()})
+                      <button
+                        type="button"
+                        onClick={() => handleToggleSelect(id)}
+                        style={{
+                          border: 'none',
+                          background: 'transparent',
+                          cursor: 'pointer',
+                          color: 'var(--accent-hover)',
+                          display: 'inline-flex',
+                          padding: 0
+                        }}
+                      >
+                        <IconX size={14} />
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Search Input Box */}
+            <div style={{ position: 'relative' }}>
+              <input
+                type="text"
+                className="input"
+                placeholder={
+                  selectedMasterIds.length > 0
+                    ? `Selected ${selectedMasterIds.length} event template(s)...`
+                    : "Type to search event templates..."
+                }
+                value={searchQuery}
+                onChange={e => {
+                  setSearchQuery(e.target.value);
+                  setIsDropdownOpen(true);
+                }}
+                onFocus={() => setIsDropdownOpen(true)}
+                style={{ paddingRight: '40px' }}
+              />
+              <button
+                type="button"
+                onClick={() => setIsDropdownOpen(prev => !prev)}
+                style={{
+                  position: 'absolute',
+                  right: '12px',
+                  top: '50%',
+                  transform: 'translateY(-50%)',
+                  border: 'none',
+                  background: 'transparent',
+                  cursor: 'pointer',
+                  color: 'var(--text-muted)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  padding: 0
+                }}
+              >
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    transform: isDropdownOpen ? 'rotate(180deg)' : 'none',
+                    transition: 'transform var(--transition-fast)'
+                  }}
+                >
+                  <IconChevronDown size={18} />
+                </span>
+              </button>
+            </div>
+
+            {/* Dropdown Options List */}
+            {isDropdownOpen && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  right: 0,
+                  zIndex: 50,
+                  marginTop: 4,
+                  background: 'var(--bg-card)',
+                  border: '1px solid var(--border-hover)',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: '0 10px 25px rgba(0,0,0,0.5)',
+                  maxHeight: '220px',
+                  overflowY: 'auto',
+                  display: 'flex',
+                  flexDirection: 'column'
+                }}
+              >
+                {/* Quick Action bar (Select All / Clear All) */}
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    padding: '8px 12px',
+                    borderBottom: '1px solid var(--border)',
+                    background: 'var(--bg-secondary)',
+                    position: 'sticky',
+                    top: 0,
+                    zIndex: 1
+                  }}
+                >
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    {filteredEvents.length} templates found
+                  </span>
+                  <div style={{ display: 'flex', gap: 12 }}>
+                    {filteredEvents.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleSelectAllFiltered}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: 'var(--accent)',
+                          fontSize: 11,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          padding: 0
+                        }}
+                      >
+                        Select All
+                      </button>
+                    )}
+                    {selectedMasterIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleClearAll}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: 'var(--score-loss)',
+                          fontSize: 11,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          padding: 0
+                        }}
+                      >
+                        Clear All
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Options List */}
+                {filteredEvents.length === 0 ? (
+                  <div style={{ padding: '16px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
+                    No templates match your search
+                  </div>
+                ) : (
+                  filteredEvents.map(me => {
+                    const isSelected = selectedMasterIds.includes(me.id);
+                    return (
+                      <div
+                        key={me.id}
+                        onClick={() => handleToggleSelect(me.id)}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '10px 14px',
+                          cursor: 'pointer',
+                          background: isSelected ? 'var(--bg-elevated)' : 'transparent',
+                          borderBottom: '1px solid var(--border)',
+                          transition: 'background var(--transition-fast)'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'var(--bg-card-hover)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = isSelected ? 'var(--bg-elevated)' : 'transparent';
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)' }}>
+                            {me.name}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                            {me.event_type.toUpperCase()} • {me.category.toUpperCase()} • {me.gender.toUpperCase()}
+                          </div>
+                        </div>
+                        {isSelected ? (
+                          <span style={{ color: 'var(--accent)', display: 'flex', alignItems: 'center' }}>
+                            <IconCheck size={16} />
+                          </span>
+                        ) : (
+                          <div
+                            style={{
+                              width: 16,
+                              height: 16,
+                              border: '1px solid var(--border-hover)',
+                              borderRadius: '3px'
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
@@ -916,11 +1400,11 @@ function AddEventModal({
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 12 }}>
-            <button type="button" className="btn btn-secondary" onClick={onClose}>
+            <button type="button" className="btn btn-secondary" onClick={onClose} disabled={isSubmitting}>
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary" disabled={!selectedMasterId}>
-              Add Event
+            <button type="submit" className="btn btn-primary" disabled={selectedMasterIds.length === 0 || isSubmitting}>
+              {isSubmitting ? `Adding ${selectedMasterIds.length} Event(s)...` : `Add Event${selectedMasterIds.length > 1 ? 's' : ''}`}
             </button>
           </div>
         </form>
@@ -954,6 +1438,10 @@ function EditTournamentModal({
   const [subMatchCount, setSubMatchCount] = useState(1);
   const [bonusPointMargin, setBonusPointMargin] = useState(tournament.bonus_point_margin || 5);
   const [bonusPointValue, setBonusPointValue] = useState(tournament.bonus_point_value || 1);
+  const [collectsFees, setCollectsFees] = useState(tournament.collects_fees || false);
+  const [entryFee, setEntryFee] = useState(String(tournament.entry_fee || '0'));
+  const [currency, setCurrency] = useState(tournament.currency || 'INR');
+  const [status, setStatus] = useState(tournament.status);
 
   // Co-admin management states
   const [activeTab, setActiveTab] = useState<'details' | 'admins' | 'certificates'>('details');
@@ -1083,12 +1571,16 @@ function EditTournamentModal({
             end_date: endDate,
             age_cutoff_date: ageCutoffDate || undefined,
             type,
+            status,
             team_size_limit: type === 'team' ? Number(teamSizeLimit) : undefined,
             team_tie_configs: type === 'team' ? teamTieConfigs : undefined,
             team_tie_events: type === 'team' ? flatTieEvents : undefined,
             bonus_point_margin: type === 'team' ? Number(bonusPointMargin) : undefined,
             bonus_point_value: type === 'team' ? Number(bonusPointValue) : undefined,
             admins: adminsList,
+            collects_fees: collectsFees,
+            entry_fee: collectsFees ? Number(entryFee) : 0,
+            currency,
           });
         }} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {activeTab === 'details' && (
@@ -1096,6 +1588,22 @@ function EditTournamentModal({
               <div className="input-group">
                 <label className="input-label" htmlFor="edit-t-name">Tournament Name *</label>
                 <input id="edit-t-name" className="input" value={name} onChange={e => setName(e.target.value)} required />
+              </div>
+              <div className="input-group">
+                <label className="input-label" htmlFor="edit-t-status">Tournament Status *</label>
+                <select
+                  id="edit-t-status"
+                  className="input"
+                  value={status}
+                  onChange={e => setStatus(e.target.value as any)}
+                  style={{ textTransform: 'capitalize' }}
+                >
+                  <option value="draft">Draft</option>
+                  <option value="open">Open (Registration Open)</option>
+                  <option value="live">Live (Ongoing)</option>
+                  <option value="completed">Completed</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
               </div>
               <div className="input-group">
                 <label className="input-label" htmlFor="edit-t-desc">Description</label>
@@ -1270,6 +1778,59 @@ function EditTournamentModal({
                   </div>
                 </div>
               )}
+
+              {/* Payment Settings */}
+              <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginTop: 8 }}>
+                <h4 style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent)', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  💰 Payment & Entry Fee Settings
+                </h4>
+                <div className="input-group" style={{ marginBottom: 12 }}>
+                  <label className="input-label" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={collectsFees}
+                      onChange={e => setCollectsFees(e.target.checked)}
+                      style={{ width: 16, height: 16, accentColor: 'var(--accent)' }}
+                    />
+                    <span style={{ fontSize: 14, fontWeight: 600 }}>Collect Entry Fees from Players</span>
+                  </label>
+                </div>
+
+                {collectsFees && (
+                  <div className="animate-slide-up" style={{ display: 'flex', flexDirection: 'column', gap: 14, borderLeft: '2px solid var(--accent)', paddingLeft: 14 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                      <div className="input-group">
+                        <label className="input-label" htmlFor="edit-t-fee">Entry Fee Amount</label>
+                        <input
+                          id="edit-t-fee"
+                          type="number"
+                          className="input"
+                          min="0"
+                          step="0.01"
+                          value={entryFee}
+                          onChange={e => setEntryFee(e.target.value)}
+                          required={collectsFees}
+                        />
+                      </div>
+                      <div className="input-group">
+                        <label className="input-label" htmlFor="edit-t-currency">Currency</label>
+                        <select
+                          id="edit-t-currency"
+                          className="input"
+                          value={currency}
+                          onChange={e => setCurrency(e.target.value)}
+                          style={{ height: 42 }}
+                        >
+                          <option value="INR">INR (₹)</option>
+                          <option value="USD">USD ($)</option>
+                          <option value="EUR">EUR (€)</option>
+                          <option value="GBP">GBP (£)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -1371,12 +1932,14 @@ function EditEventModal({
   event,
   masterEvents,
   onClose,
-  onUpdate
+  onUpdate,
+  onDelete
 }: {
   event: TournamentEvent;
   masterEvents: MasterEvent[];
   onClose: () => void;
   onUpdate: (data: Partial<TournamentEvent>) => void;
+  onDelete: (id: string) => void;
 }) {
   const [entryLimit, setEntryLimit] = useState(event.entry_limit);
   const [format, setFormat] = useState(event.format);
@@ -1452,13 +2015,26 @@ function EditEventModal({
             </select>
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 12 }}>
-            <button type="button" className="btn btn-secondary" onClick={onClose}>
-              Cancel
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginTop: 12 }}>
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={() => {
+                if (confirm(`Are you sure you want to delete this event "${eventName}"? All registration data for this event will be lost.`)) {
+                  onDelete(event.id);
+                }
+              }}
+            >
+              🗑️ Delete Event
             </button>
-            <button type="submit" className="btn btn-primary">
-              Save Changes
-            </button>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button type="button" className="btn btn-secondary" onClick={onClose}>
+                Cancel
+              </button>
+              <button type="submit" className="btn btn-primary">
+                Save Changes
+              </button>
+            </div>
           </div>
         </form>
       </div>

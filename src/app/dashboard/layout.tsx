@@ -37,19 +37,19 @@ function MoonIcon({ size = 18 }: { size?: number }) {
 }
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const { user, activeRole, logout, switchRole, needsRoleSelection, selectRole, isProfileComplete } = useAuth();
+  const { user, isLoading, activeRole, logout, switchRole, needsRoleSelection, selectRole, isProfileComplete } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const router = useRouter();
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   React.useEffect(() => {
-    if (!user) {
+    if (!user && !isLoading) {
       router.push('/login');
     }
-  }, [user, router]);
+  }, [user, isLoading, router]);
 
-  if (!user) return null;
+  if (!user || isLoading) return null;
 
   // Profile completion guard — redirect to profile page if incomplete
   const isOnProfilePage = pathname === '/dashboard/profile';
@@ -115,7 +115,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const adminLinks = [
     { href: '/dashboard', label: 'Dashboard', icon: <IconDashboard size={18} /> },
-    { href: '/dashboard/tournaments', label: 'Tournaments', icon: <IconTrophy size={18} /> },
+    { href: '/dashboard/tournaments', label: 'Manage Tournaments', icon: <IconTrophy size={18} /> },
+    { href: '/dashboard/my-tournaments', label: 'Browse Tournaments', icon: <IconTrophy size={18} /> },
     { href: '/dashboard/events', label: 'All Events', icon: <IconClipboard size={18} /> },
     { href: '/dashboard/registrations', label: 'Registrations', icon: <IconClipboard size={18} /> },
     { href: '/dashboard/fixtures', label: 'Fixtures', icon: <IconGitBranch size={18} /> },
@@ -129,7 +130,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const playerLinks = [
     { href: '/dashboard', label: 'Dashboard', icon: <IconDashboard size={18} /> },
-    { href: '/dashboard/my-tournaments', label: 'My Tournaments', icon: <IconTrophy size={18} /> },
+    { href: '/dashboard/my-tournaments', label: 'Browse Tournaments', icon: <IconTrophy size={18} /> },
     { href: '/dashboard/my-matches', label: 'My Matches', icon: <IconActivity size={18} /> },
     { href: '/dashboard/players', label: 'Players Directory', icon: <IconUsers size={18} /> },
     { href: '/dashboard/profile', label: 'My Profile', icon: <IconUsers size={18} /> },
@@ -138,6 +139,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const umpireLinks = [
     { href: '/dashboard', label: 'Dashboard', icon: <IconDashboard size={18} /> },
     { href: '/dashboard/scoring', label: 'Live Scoring', icon: <IconActivity size={18} /> },
+    { href: '/dashboard/my-tournaments', label: 'Browse Tournaments', icon: <IconTrophy size={18} /> },
     { href: '/dashboard/players', label: 'Players Directory', icon: <IconUsers size={18} /> },
     { href: '/dashboard/profile', label: 'My Profile', icon: <IconUsers size={18} /> },
   ];

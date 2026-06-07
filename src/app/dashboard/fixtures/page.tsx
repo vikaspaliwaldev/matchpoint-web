@@ -11,6 +11,7 @@ import {
   updateMatchPlayers,
   deleteMatch,
   createMatch,
+  updateRoundName,
 } from '@/lib/supabase-service';
 import { generateKnockoutBracket } from '@/lib/fixtures';
 import { Match, TournamentEvent, Tournament, Registration, Team } from '@/types';
@@ -289,17 +290,65 @@ export default function FixturesPage() {
 
   // Group existing matches by round
   const matchesByRound = existingMatches.reduce((acc, m) => {
-    if (!acc[m.fixture_round]) acc[m.fixture_round] = [];
-    acc[m.fixture_round].push(m);
+    const round = m.fixture_round ?? 0;
+    if (!acc[round]) acc[round] = [];
+    acc[round].push(m);
     return acc;
   }, {} as Record<number, Match[]>);
+
+  const handleRenameRound = async (roundNum: number, newName: string) => {
+    if (!selectedEvent) return;
+    
+    // Case 1: If it's a generated preview bracket (not saved to DB yet)
+    if (generatedBracket) {
+      setGeneratedBracket(prev => {
+        if (!prev) return null;
+        const updatedRounds = prev.rounds.map(r => 
+          r.round_number === roundNum ? { ...r, round_name: newName } : r
+        );
+        // Also update round_name in the matches inside this round in the preview
+        const updatedRoundsWithMatches = updatedRounds.map(r => {
+          if (r.round_number === roundNum) {
+            return {
+              ...r,
+              matches: r.matches.map(m => ({ ...m, round_name: newName }))
+            };
+          }
+          return r;
+        });
+        return { rounds: updatedRoundsWithMatches };
+      });
+      return;
+    }
+
+    // Case 2: Saved matches (in database)
+    try {
+      setLoading(true);
+      await updateRoundName(selectedEvent, roundNum, newName);
+      
+      // Update local state matches
+      setMatches(prev => prev.map(m => 
+        (m.event_id === selectedEvent && m.fixture_round === roundNum) 
+          ? { ...m, round_name: newName } 
+          : m
+      ));
+    } catch (err) {
+      console.error('Failed to update round name:', err);
+      alert('Failed to update round name.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const roundNames = (roundNum: number, total: number) => {
     const fromFinal = total - roundNum;
     switch (fromFinal) {
-      case 0: return 'Final';
-      case 1: return 'Semi Finals';
-      case 2: return 'Quarter Finals';
+      case 1: return 'Final';
+      case 2: return 'Semi Finals';
+      case 3: return 'Quarter Finals';
+      case 4: return 'Round of 16';
+      case 5: return 'Round of 32';
+      case 6: return 'Round of 64';
       default: return `Round ${roundNum + 1}`;
     }
   };
@@ -479,6 +528,7 @@ export default function FixturesPage() {
                       totalRounds={generatedBracket.rounds.length}
                       onEdit={handleEditMatchClick}
                       onDelete={handleDeleteMatch}
+                      onRename={handleRenameRound}
                     />
                   ))
                 ) : (
@@ -487,12 +537,16 @@ export default function FixturesPage() {
                     .map(([roundNum, matches]) => (
                       <BracketRound
                         key={roundNum}
-                        roundName={roundNames(Number(roundNum), totalRounds)}
+                        roundName={
+                          matches.find(m => m.round_name)?.round_name ||
+                          roundNames(Number(roundNum), totalRounds)
+                        }
                         matches={matches}
                         roundIndex={Number(roundNum)}
                         totalRounds={totalRounds}
                         onEdit={handleEditMatchClick}
                         onDelete={handleDeleteMatch}
+                        onRename={handleRenameRound}
                       />
                     ))
                 )}
@@ -702,6 +756,7 @@ function BracketRound({
   roundIndex,
   onEdit,
   onDelete,
+  onRename,
 }: {
   roundName: string;
   matches: Match[];
@@ -709,21 +764,89 @@ function BracketRound({
   totalRounds: number;
   onEdit: (match: Match) => void;
   onDelete: (matchId: string) => void;
+  onRename?: (roundIndex: number, newName: string) => void;
 }) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editName, setEditName] = useState(roundName);
+
+  // Sync state if roundName changes externally
+  useEffect(() => {
+    setEditName(roundName);
+  }, [roundName]);
+
+  const handleSave = () => {
+    setIsEditing(false);
+    if (editName.trim() && editName.trim() !== roundName && onRename) {
+      onRename(roundIndex, editName.trim());
+    }
+  };
+
   const gap = Math.pow(2, roundIndex) * 20;
 
   return (
     <div style={{ minWidth: 240 }}>
       <div style={{
-        fontSize: 13,
-        fontWeight: 600,
-        color: 'var(--text-muted)',
-        textTransform: 'uppercase',
-        letterSpacing: '0.05em',
         marginBottom: 16,
         textAlign: 'center',
+        minHeight: 28,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
       }}>
-        {roundName}
+        {isEditing ? (
+          <input
+            className="input"
+            value={editName}
+            onChange={e => setEditName(e.target.value)}
+            onBlur={handleSave}
+            onKeyDown={e => {
+              if (e.key === 'Enter') handleSave();
+              if (e.key === 'Escape') {
+                setEditName(roundName);
+                setIsEditing(false);
+              }
+            }}
+            autoFocus
+            style={{
+              padding: '2px 8px',
+              fontSize: 13,
+              fontWeight: 600,
+              height: 28,
+              textAlign: 'center',
+              width: '100%',
+              maxWidth: 180,
+            }}
+          />
+        ) : (
+          <div 
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: 'var(--text-muted)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              cursor: 'pointer',
+              padding: '2px 8px',
+              borderRadius: 'var(--radius-sm)',
+            }}
+            onClick={() => setIsEditing(true)}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'var(--bg-elevated)';
+              e.currentTarget.style.color = 'var(--text-primary)';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'transparent';
+              e.currentTarget.style.color = 'var(--text-muted)';
+            }}
+            title="Click to rename round"
+          >
+            {roundName} ✏️
+          </div>
+        )}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap, justifyContent: 'center' }}>
         {matches.map(match => (

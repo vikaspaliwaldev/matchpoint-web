@@ -26,6 +26,12 @@ export default function TeamsPage() {
   const [loading, setLoading] = useState(true);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showAssignModal, setShowAssignModal] = useState<string | null>(null); // team id
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 10;
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [selectedTournament]);
 
   // Load team tournaments on mount
   useEffect(() => {
@@ -490,41 +496,108 @@ export default function TeamsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {getStandings().map((row, idx) => (
-                    <tr key={row.teamId} style={{ borderBottom: '1px solid var(--border)', transition: 'background 0.2s', background: idx === 0 && row.played > 0 ? 'rgba(99, 102, 241, 0.05)' : 'transparent' }}>
-                      <td style={{ padding: '14px 20px', fontWeight: 700 }}>
-                        {idx === 0 ? '🏆 1' : idx + 1}
-                      </td>
-                      <td style={{ padding: '14px 20px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                          <span style={{ width: 12, height: 12, borderRadius: '50%', background: row.logoColor, display: 'inline-block' }} />
-                          <span style={{ fontWeight: 600 }}>{row.teamName}</span>
-                        </div>
-                      </td>
-                      <td style={{ padding: '14px 20px', textAlign: 'center' }}>{row.played}</td>
-                      <td style={{ padding: '14px 20px', textAlign: 'center', color: 'var(--score-live)', fontWeight: 600 }}>{row.won}</td>
-                      <td style={{ padding: '14px 20px', textAlign: 'center', color: 'var(--score-loss)' }}>{row.lost}</td>
-                      <td style={{ padding: '14px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                        {row.setsWon} - {row.setsLost}
-                      </td>
-                      <td style={{ padding: '14px 20px', textAlign: 'center', color: 'var(--accent)', fontWeight: 600 }}>
-                        +{row.bonusPoints}
-                      </td>
-                      <td style={{ padding: '14px 20px', textAlign: 'center', fontWeight: 700, fontSize: 16 }}>
-                        {row.points}
-                      </td>
-                    </tr>
-                  ))}
-                  {tournamentTeams.length === 0 && (
-                    <tr>
-                      <td colSpan={8} style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
-                        No standings available. Add teams to see calculations.
-                      </td>
-                    </tr>
-                  )}
+                  {(() => {
+                    const standings = getStandings();
+                    const totalItems = standings.length;
+                    const totalPages = Math.ceil(totalItems / pageSize) || 1;
+                    const paginatedStandings = standings.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+                    return (
+                      <>
+                        {paginatedStandings.map((row, idx) => {
+                          const absoluteIndex = (currentPage - 1) * pageSize + idx;
+                          return (
+                            <tr key={row.teamId} style={{ borderBottom: '1px solid var(--border)', transition: 'background 0.2s', background: absoluteIndex === 0 && row.played > 0 ? 'rgba(99, 102, 241, 0.05)' : 'transparent' }}>
+                              <td style={{ padding: '14px 20px', fontWeight: 700 }}>
+                                {absoluteIndex === 0 ? '🏆 1' : absoluteIndex + 1}
+                              </td>
+                              <td style={{ padding: '14px 20px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                  <span style={{ width: 12, height: 12, borderRadius: '50%', background: row.logoColor, display: 'inline-block' }} />
+                                  <span style={{ fontWeight: 600 }}>{row.teamName}</span>
+                                </div>
+                              </td>
+                              <td style={{ padding: '14px 20px', textAlign: 'center' }}>{row.played}</td>
+                              <td style={{ padding: '14px 20px', textAlign: 'center', color: 'var(--score-live)', fontWeight: 600 }}>{row.won}</td>
+                              <td style={{ padding: '14px 20px', textAlign: 'center', color: 'var(--score-loss)' }}>{row.lost}</td>
+                              <td style={{ padding: '14px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                                {row.setsWon} - {row.setsLost}
+                              </td>
+                              <td style={{ padding: '14px 20px', textAlign: 'center', color: 'var(--accent)', fontWeight: 600 }}>
+                                +{row.bonusPoints}
+                              </td>
+                              <td style={{ padding: '14px 20px', textAlign: 'center', fontWeight: 700, fontSize: 16 }}>
+                                {row.points}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        
+                        {tournamentTeams.length === 0 && (
+                          <tr>
+                            <td colSpan={8} style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
+                              No standings available. Add teams to see calculations.
+                            </td>
+                          </tr>
+                        )}
+                      </>
+                    );
+                  })()}
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            {(() => {
+              const standings = getStandings();
+              const totalItems = standings.length;
+              const totalPages = Math.ceil(totalItems / pageSize) || 1;
+              if (totalItems === 0) return null;
+              
+              return (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, flexWrap: 'wrap', gap: 12 }}>
+                  <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                    Showing {(currentPage - 1) * pageSize + 1} to {Math.min(currentPage * pageSize, totalItems)} of {totalItems} entries
+                  </span>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+                      disabled={currentPage === 1}
+                      className="btn btn-secondary"
+                      style={{ padding: '6px 12px', fontSize: 13 }}
+                    >
+                      Previous
+                    </button>
+                    {Array.from({ length: totalPages }, (_, i) => i + 1)
+                      .filter(page => page === 1 || page === totalPages || Math.abs(page - currentPage) <= 1)
+                      .map((page, idx, arr) => {
+                        const showEllipsisBefore = idx > 0 && page - arr[idx - 1] > 1;
+                        return (
+                          <React.Fragment key={page}>
+                            {showEllipsisBefore && <span style={{ padding: '6px 8px', color: 'var(--text-muted)' }}>...</span>}
+                            <button
+                              onClick={() => setCurrentPage(page)}
+                              className={`btn ${currentPage === page ? 'btn-primary' : 'btn-secondary'}`}
+                              style={{ padding: '6px 12px', fontSize: 13, minWidth: 36 }}
+                            >
+                              {page}
+                            </button>
+                          </React.Fragment>
+                        );
+                      })
+                    }
+                    <button
+                      onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+                      disabled={currentPage === totalPages}
+                      className="btn btn-secondary"
+                      style={{ padding: '6px 12px', fontSize: 13 }}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         </>
       ) : null}

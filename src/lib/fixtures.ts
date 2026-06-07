@@ -91,6 +91,7 @@ export function generateKnockoutBracket(config: FixtureConfig): GeneratedFixture
       status: (isBye ? 'completed' : 'scheduled') as MatchStatus,
       winner_id: isBye ? (p1 ? p1.player_id : p2?.player_id) : undefined,
       sets: [],
+      round_name: getRoundName(0, totalRounds),
       sub_matches: tournamentType === 'team' && teamTieEvents.length > 0 && !isBye
         ? teamTieEvents.map((evt, idx) => ({
             id: `sub-m-${eventId}-r0-${i}-${evt.replace(/[^a-zA-Z0-9]/g, '-')}-${idx}`,
@@ -138,6 +139,7 @@ export function generateKnockoutBracket(config: FixtureConfig): GeneratedFixture
         player2_name: 'TBD',
         status: 'scheduled' as MatchStatus,
         sets: [],
+        round_name: getRoundName(r, totalRounds),
         sub_matches: tournamentType === 'team' && teamTieEvents.length > 0
           ? teamTieEvents.map((evt, idx) => ({
               id: `sub-m-${eventId}-r${r}-${i}-${evt.replace(/[^a-zA-Z0-9]/g, '-')}-${idx}`,

@@ -40,19 +40,38 @@ const getAuthHeaders = () => {
 };
 
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}/api/v1${path}`, {
-    ...options,
-    headers: {
-      ...getAuthHeaders(),
-      ...options.headers
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/v1${path}`, {
+      ...options,
+      headers: {
+        ...getAuthHeaders(),
+        ...options.headers
+      }
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      if (res.status === 502 || res.status === 503 || res.status === 504) {
+        if (typeof window !== 'undefined' && window.location.pathname !== '/maintenance') {
+          window.location.href = '/maintenance';
+        }
+      }
+      throw new Error(text || `HTTP error ${res.status}`);
     }
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP error ${res.status}`);
+    if (res.status === 204) return null as any;
+    return await res.json();
+  } catch (err: any) {
+    if (err instanceof TypeError || (err.message && (
+      err.message.includes('fetch failed') || 
+      err.message.includes('Failed to fetch') || 
+      err.message.includes('NetworkError') ||
+      err.message.includes('load failed')
+    ))) {
+      if (typeof window !== 'undefined' && window.location.pathname !== '/maintenance') {
+        window.location.href = '/maintenance';
+      }
+    }
+    throw err;
   }
-  if (res.status === 204) return null as any;
-  return await res.json();
 }
 
 export async function logClientActivity(type: string, details?: string, userId?: string, userName?: string): Promise<void> {
@@ -85,7 +104,7 @@ export async function getTournaments(): Promise<Tournament[]> {
   try {
     const data = await apiFetch<Tournament[]>('/tournaments');
     data.sort((a, b) => new Date(b.start_date).getTime() - new Date(a.start_date).getTime());
-    await logClientActivity('PAGE_VIEW', 'Viewed tournaments dashboard');
+    logClientActivity('PAGE_VIEW', 'Viewed tournaments dashboard');
     return data;
   } catch (err) {
     console.error('getTournaments REST API error, falling back to mock:', err);
@@ -488,7 +507,10 @@ function mapBackendMatchToMatch(m: any): Match {
       })),
       status: sm.status,
       winner_id: sm.winner_id || sm.winnerId,
-    }))
+    })),
+    round_name: m.round_name || m.roundName,
+    is_adhoc: m.is_adhoc !== undefined ? m.is_adhoc : m.isAdhoc,
+    adhoc_type: m.adhoc_type || m.adhocType,
   };
 }
 
@@ -980,7 +1002,7 @@ export async function logAction(
     id: logId,
     action,
     category,
-    user_id: (logUser.id && logUser.id.startsWith('u')) ? logUser.id : undefined,
+    user_id: (logUser.id && logUser.id.startsWith('u-')) ? logUser.id : undefined,
     user_name: logUser.name,
     details: details || '',
     created_at: new Date().toISOString(),
@@ -1050,9 +1072,7 @@ export async function updateTournament(
     }
   }
 
-  if (currentStatus === 'completed' || currentStatus === 'cancelled') {
-    throw new Error(`Cannot edit tournament because it is already ${currentStatus}.`);
-  }
+  // Allow editing or updating the status at any stage
 
   if (!isSupabaseConfigured) {
     const idx = mock.mockTournaments.findIndex(t => t.id === id);
@@ -1078,6 +1098,11 @@ export async function updateTournament(
         end_date: data.end_date !== undefined ? data.end_date : existing.end_date,
         bonus_point_margin: data.bonus_point_margin !== undefined ? data.bonus_point_margin : existing.bonus_point_margin,
         bonus_point_value: data.bonus_point_value !== undefined ? data.bonus_point_value : existing.bonus_point_value,
+        collects_fees: data.collects_fees !== undefined ? data.collects_fees : existing.collects_fees,
+        entry_fee: data.entry_fee !== undefined ? data.entry_fee : existing.entry_fee,
+        currency: data.currency !== undefined ? data.currency : existing.currency,
+        stripe_account_id: data.stripe_account_id !== undefined ? data.stripe_account_id : existing.stripe_account_id,
+        platform_fee_percentage: data.platform_fee_percentage !== undefined ? data.platform_fee_percentage : existing.platform_fee_percentage,
       };
 
       await apiFetch(`/tournaments/${id}`, {
@@ -1172,6 +1197,72 @@ export async function updateEvent(
     `Event "${data.event_name || id}" updated`,
     'event',
     `Fields: ${Object.keys(data).join(', ')}`,
+    user
+  );
+}
+
+export async function deleteEvent(id: string, user?: { id: string; name: string } | null): Promise<void> {
+  if (!isSupabaseConfigured) {
+    const idx = mock.mockEvents.findIndex(e => e.id === id);
+    if (idx !== -1) {
+      mock.mockEvents.splice(idx, 1);
+    }
+  } else {
+    try {
+      await apiFetch(`/events/${id}`, {
+        method: 'DELETE'
+      });
+    } catch (err) {
+      console.error(`Failed to delete event ${id}:`, err);
+      throw err;
+    }
+  }
+
+  await logAction(
+    `Event "${id}" deleted`,
+    'event',
+    `Event ID: ${id}`,
+    user
+  );
+}
+
+export async function updateRoundName(
+  eventId: string,
+  roundNumber: number,
+  newRoundName: string,
+  user?: { id: string; name: string } | null
+): Promise<void> {
+  if (!isSupabaseConfigured) {
+    mock.mockEvents.forEach(m => {
+      // Since event doesn't store match round name directly (it groups matches),
+      // we update round name in mock matches:
+    });
+    mock.mockMatches.forEach(m => {
+      if (m.event_id === eventId && m.fixture_round === roundNumber) {
+        m.round_name = newRoundName;
+      }
+    });
+    return;
+  }
+  try {
+    const allMatches = await apiFetch<any[]>(`/matches/event/${eventId}`);
+    const roundMatches = allMatches.filter(m => m.fixture_round === roundNumber);
+    for (const m of roundMatches) {
+      m.round_name = newRoundName;
+      await apiFetch(`/matches/${m.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(m)
+      });
+    }
+  } catch (err) {
+    console.error('updateRoundName REST API error:', err);
+    throw err;
+  }
+
+  await logAction(
+    `Round name updated`,
+    'match',
+    `Event ID: ${eventId}, Round: ${roundNumber}, Name: ${newRoundName}`,
     user
   );
 }
@@ -1450,7 +1541,7 @@ export async function createSupportRequest(payload: {
     return payload;
   }
   try {
-    return await apiFetch<any>('/support-requests', {
+    return await apiFetch<any>('/public/support', {
       method: 'POST',
       body: JSON.stringify(payload)
     });
@@ -1482,4 +1573,57 @@ export async function createTournamentFeedback(payload: {
   }
 }
 
+export async function getCheckoutSessionUrl(registrationId: string): Promise<string> {
+  if (!isSupabaseConfigured) {
+    return `/payment/success?registration_id=${registrationId}`;
+  }
+  try {
+    const res = await apiFetch<{ checkout_url: string }>('/public/registrations/checkout-session', {
+      method: 'POST',
+      body: JSON.stringify({ registration_id: registrationId })
+    });
+    return res.checkout_url;
+  } catch (err) {
+    console.error('getCheckoutSessionUrl REST API error:', err);
+    throw err;
+  }
+}
 
+export async function connectStripeConnect(tournamentId: string): Promise<string> {
+  if (!isSupabaseConfigured) {
+    return `http://localhost:8080/api/v1/public/payments/mock-onboard-success?tournament_id=${tournamentId}`;
+  }
+  try {
+    const refreshUrl = `${window.location.origin}/organizer/stripe/refresh`;
+    const returnUrl = `${window.location.origin}/organizer/stripe/return`;
+    const res = await apiFetch<{ url: string }>('/organizations/connect-stripe', {
+      method: 'POST',
+      body: JSON.stringify({
+        tournament_id: tournamentId,
+        refresh_url: refreshUrl,
+        return_url: returnUrl
+      })
+    });
+    return res.url;
+  } catch (err) {
+    console.error('connectStripeConnect REST API error:', err);
+    throw err;
+  }
+}
+
+export async function getRegistrationById(regId: string): Promise<Registration> {
+  if (!isSupabaseConfigured) {
+    const reg = mock.mockRegistrations.find(r => r.id === regId);
+    if (!reg) throw new Error('Registration not found');
+    return reg;
+  }
+  try {
+    const data = await apiFetch<Registration>(`/registrations/${regId}`);
+    return data;
+  } catch (err) {
+    console.error('getRegistrationById REST API error, falling back to mock:', err);
+    const reg = mock.mockRegistrations.find(r => r.id === regId);
+    if (!reg) throw new Error('Registration not found');
+    return reg;
+  }
+}

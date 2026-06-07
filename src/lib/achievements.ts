@@ -92,7 +92,7 @@ export function getPlayerAchievements(playerId: string, allMatches: Match[]): Ac
 
     // A. Champion Badge (Won a final fixture)
     // We assume fixture_round >= 3 (e.g. Semi-finals / Finals) or round is the final match in the list
-    if (isWinner && match.fixture_round >= 3) {
+    if (isWinner && match.fixture_round !== undefined && match.fixture_round >= 3) {
       championEarned = true;
     }
 

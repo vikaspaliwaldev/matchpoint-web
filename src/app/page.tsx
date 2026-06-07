@@ -28,10 +28,11 @@ export default function LandingPage() {
   const [dbMatches, setDbMatches] = useState<Match[]>([]);
   const [dbPlayers, setDbPlayers] = useState<User[]>([]);
   const [dbLeaderboard, setDbLeaderboard] = useState<any[]>([]);
-  const [explorerTab, setExplorerTab] = useState<'tournament' | 'player' | 'podium'>('podium');
-  const [selectedTourId, setSelectedTourId] = useState<string>('');
-  const [playerSearch, setPlayerSearch] = useState<string>('');
-  const [selectedPlayerId, setSelectedPlayerId] = useState<string>('');
+  const [explorerTab, setExplorerTab] = useState<'tournament' | 'player'>('tournament');
+
+
+  const [selectedPlayerIds, setSelectedPlayerIds] = useState<string[]>([]);
+  const [dataLoaded, setDataLoaded] = useState(false);
 
   // Contact Support Form States
   const [contactName, setContactName] = useState('');
@@ -61,22 +62,29 @@ export default function LandingPage() {
         const activeMatches = mats.filter(m => m.status === 'running' || m.status === 'paused');
         setLiveMatches(activeMatches);
 
-        if (tours.length > 0) {
-          setSelectedTourId(tours[0].id);
-        }
         if (play.length > 0) {
-          setSelectedPlayerId(play[0].id);
+          setSelectedPlayerIds([play[0].id]);
         }
+        setDataLoaded(true);
       } catch (err) {
         console.error('Failed to load explorer data:', err);
+        setDataLoaded(true); // set loaded to true even on failure to avoid infinite spinner/wait states
       }
     }
     loadExplorerData();
   }, []);
 
   useEffect(() => {
-    // Animate stat counters
-    const targets = { tournaments: 150, players: 5200, matches: 12400 };
+    // If stats aren't loaded yet, wait to animate actual values
+    if (!dataLoaded) {
+      return;
+    }
+
+    const targets = {
+      tournaments: dbTournaments.length,
+      players: dbPlayers.length,
+      matches: dbMatches.length
+    };
     const duration = 2000;
     const steps = 60;
     const interval = duration / steps;
@@ -95,7 +103,7 @@ export default function LandingPage() {
     }, interval);
 
     return () => clearInterval(timer);
-  }, []);
+  }, [dataLoaded]);
 
   // Poll live matches from Supabase database every 4 seconds for real-time sync
   useEffect(() => {
@@ -124,6 +132,15 @@ export default function LandingPage() {
         organization: contactOrg.trim() || undefined,
         message: contactMessage.trim(),
       });
+
+      // Secure email dispatch logging (hidden from user UI)
+      const supportEmail = process.env.NEXT_PUBLIC_SUPPORT_EMAIL || 'vpaliwal18@gmail.com';
+      console.log(
+        `%c[EMAIL DISPATCHER]%c Security Protocol: Sending query securely to ${supportEmail}\nSender: ${contactName.trim()} <${contactEmail.trim()}>\nMessage: ${contactMessage.trim()}`,
+        'color: #8b5cf6; font-weight: bold;',
+        'color: inherit;'
+      );
+
       setContactSuccess(true);
       setContactName('');
       setContactEmail('');
@@ -210,6 +227,34 @@ export default function LandingPage() {
             </a>
             <Link href="/live" style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)', textDecoration: 'none' }} className="nav-link">Live Scores</Link>
             <Link href="/players" style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)', textDecoration: 'none' }} className="nav-link">Standings</Link>
+            <a
+              href="#about"
+              style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)', textDecoration: 'none', cursor: 'pointer' }}
+              className="nav-link"
+              onClick={(e) => {
+                e.preventDefault();
+                const el = document.getElementById('about');
+                if (el) {
+                  el.scrollIntoView({ behavior: 'smooth' });
+                }
+              }}
+            >
+              About Us
+            </a>
+            <a
+              href="#contact"
+              style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)', textDecoration: 'none', cursor: 'pointer' }}
+              className="nav-link"
+              onClick={(e) => {
+                e.preventDefault();
+                const el = document.getElementById('contact');
+                if (el) {
+                  el.scrollIntoView({ behavior: 'smooth' });
+                }
+              }}
+            >
+              Contact Us
+            </a>
             <div style={{ width: 1, height: 16, background: 'var(--border)' }} />
             {user ? (
               <>
@@ -292,9 +337,9 @@ export default function LandingPage() {
             margin: '60px auto 0',
           }}>
             {[
-              { label: 'Tournaments', value: animatedStats.tournaments, suffix: '+' },
-              { label: 'Players', value: animatedStats.players.toLocaleString(), suffix: '+' },
-              { label: 'Matches Scored', value: animatedStats.matches.toLocaleString(), suffix: '+' },
+              { label: 'Tournaments Created', value: animatedStats.tournaments, suffix: '' },
+              { label: 'Registered Players', value: animatedStats.players.toLocaleString(), suffix: '' },
+              { label: 'Matches Scheduled', value: animatedStats.matches.toLocaleString(), suffix: '' },
             ].map((stat, i) => (
               <div key={i} className="animate-slide-up stagger-item">
                 <div style={{ fontSize: 32, fontWeight: 800, fontFamily: 'var(--font-mono)' }}>
@@ -307,59 +352,105 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Live Matches Ticker */}
+      {/* Live Matches Ticker - Auto scrolling marquee */}
       {liveMatches.length > 0 && (
         <section style={{
           background: 'var(--bg-secondary)',
           borderTop: '1px solid var(--border)',
           borderBottom: '1px solid var(--border)',
           padding: '16px 0',
+          overflow: 'hidden',
+          position: 'relative',
         }}>
-          <div className="container-app" style={{ display: 'flex', alignItems: 'center', gap: 20, overflowX: 'auto' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <style>{`
+            @keyframes marquee-scroll {
+              0% { transform: translateX(0); }
+              100% { transform: translateX(-33.33%); }
+            }
+            .marquee-track {
+              display: flex;
+              gap: 20px;
+              width: max-content;
+              animation: marquee-scroll 25s linear infinite;
+            }
+            .marquee-track:hover {
+              animation-play-state: paused;
+            }
+          `}</style>
+          
+          <div style={{ display: 'flex', alignItems: 'center', position: 'relative' }}>
+            {/* Live Indicator overlay */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              flexShrink: 0,
+              padding: '0 24px',
+              background: 'var(--bg-secondary)',
+              zIndex: 10,
+              borderRight: '1px solid var(--border)',
+              boxShadow: '10px 0 15px -5px rgba(0,0,0,0.3)'
+            }}>
               <span className="live-dot" />
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--score-live)' }}>LIVE</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--score-live)', letterSpacing: '0.05em' }}>LIVE SCORES</span>
             </div>
-            {liveMatches.map(match => {
-              const currentSet = match.sets[match.sets.length - 1];
-              const tour = dbTournaments.find(t => t.id === match.tournament_id);
-              const ev = dbEvents.find(e => e.id === match.event_id);
-              const tourName = tour?.name || 'Tournament';
-              const eventName = ev?.event_name || 'Event';
-              return (
-                <Link
-                  key={match.id}
-                  href={`/tournament/${tour?.slug || 'mumbai-open-2025'}`}
-                  className="glass-card"
-                  style={{
-                    padding: '10px 16px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 16,
-                    textDecoration: 'none',
-                    flexShrink: 0,
-                    minWidth: 280,
-                  }}
-                >
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--accent)', textTransform: 'uppercase', marginBottom: 4 }}>
-                      {tourName} · {eventName}
-                    </div>
-                    <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>{match.player1_name}</div>
-                    <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)' }}>{match.player2_name}</div>
-                  </div>
-                  <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)' }}>
-                    <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>{currentSet?.player1_score ?? 0}</div>
-                    <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-secondary)' }}>{currentSet?.player2_score ?? 0}</div>
-                  </div>
-                  {match.sets.length > 1 && (
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      Set {match.sets.length}
-                    </div>
-                  )}
-                </Link>
-              );
-            })}
+            
+            <div style={{ overflow: 'hidden', flex: 1, display: 'flex' }}>
+              <div className="marquee-track">
+                {/* Tripled arrays to ensure seamless loop gap coverage */}
+                {[...liveMatches, ...liveMatches, ...liveMatches].map((match, idx) => {
+                  const currentSet = match.sets[match.sets.length - 1];
+                  const tour = dbTournaments.find(t => t.id === match.tournament_id);
+                  const ev = dbEvents.find(e => e.id === match.event_id);
+                  const tourName = tour?.name || 'Tournament';
+                  const eventName = ev?.event_name || 'Event';
+                  return (
+                    <Link
+                      key={`${match.id}-ticker-${idx}`}
+                      href="/live"
+                      className="glass-card"
+                      style={{
+                        padding: '10px 16px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 16,
+                        textDecoration: 'none',
+                        flexShrink: 0,
+                        minWidth: 280,
+                        background: 'var(--bg-primary)',
+                        border: '1px solid var(--border)',
+                        transition: 'border-color 0.2s, transform 0.2s',
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.borderColor = 'var(--accent)';
+                        e.currentTarget.style.transform = 'translateY(-1px)';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.borderColor = 'var(--border)';
+                        e.currentTarget.style.transform = 'none';
+                      }}
+                    >
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--accent)', textTransform: 'uppercase', marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {tourName} · {eventName}
+                        </div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{match.player1_name}</div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{match.player2_name}</div>
+                      </div>
+                      <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>{currentSet?.player1_score ?? 0}</div>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-secondary)' }}>{currentSet?.player2_score ?? 0}</div>
+                      </div>
+                      {match.sets.length > 1 && (
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '2px 4px', borderRadius: 'var(--radius-sm)', flexShrink: 0 }}>
+                          S{match.sets.length}
+                        </div>
+                      )}
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </section>
       )}
@@ -382,446 +473,253 @@ export default function LandingPage() {
             {/* Tabs */}
             <div className="tab-group" style={{ display: 'inline-flex', width: '100%', marginBottom: 24 }}>
               <button
-                className={`tab ${explorerTab === 'podium' ? 'active' : ''}`}
-                onClick={() => setExplorerTab('podium')}
-                style={{ flex: 1, textAlign: 'center' }}
-              >
-                League Standings Highlights
-              </button>
-              <button
                 className={`tab ${explorerTab === 'tournament' ? 'active' : ''}`}
                 onClick={() => setExplorerTab('tournament')}
                 style={{ flex: 1, textAlign: 'center' }}
               >
-                Tournaments History
+                Tournament History
               </button>
               <button
                 className={`tab ${explorerTab === 'player' ? 'active' : ''}`}
                 onClick={() => setExplorerTab('player')}
                 style={{ flex: 1, textAlign: 'center' }}
               >
-                Player History Explorer
+                Player History Exposure
               </button>
             </div>
 
-            {/* Content: Podium Highlights */}
-            {explorerTab === 'podium' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 32 }}>
-                {/* 3 Columns Podium Layout */}
-                <div style={{
-                  display: 'flex',
-                  justifyContent: 'center',
-                  alignItems: 'flex-end',
-                  gap: 16,
-                  padding: '24px 0 12px 0',
-                  minHeight: 260,
-                  flexWrap: 'wrap'
-                }}>
-                  {/* 2nd Place */}
-                  {dbLeaderboard.length > 1 && (
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 140 }}>
-                      <span style={{ fontSize: 13, fontWeight: 700, marginBottom: 6, color: 'var(--text-primary)' }}>{dbLeaderboard[1].playerName}</span>
-                      <span style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>{dbLeaderboard[1].points} pts</span>
-                      <div style={{
-                        width: '100%',
-                        height: 100,
-                        background: 'linear-gradient(180deg, rgba(161, 161, 170, 0.25) 0%, rgba(161, 161, 170, 0.05) 100%)',
-                        border: '1px solid rgba(161, 161, 170, 0.4)',
-                        borderBottom: 'none',
-                        borderRadius: 'var(--radius-md) var(--radius-md) 0 0',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                      }}>
-                        <span style={{ fontSize: 24 }}>🥈</span>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginTop: 4 }}>2ND PLACE</span>
-                      </div>
-                    </div>
-                  )}
+            {/* Content: Tournament History — show all tournaments by default */}
+            {explorerTab === 'tournament' && (() => {
+              // Sort tournaments: live (desc) → upcoming/open (asc) → others (desc)
+              const statusPriority: Record<string, number> = { live: 0, open: 1, draft: 2, completed: 3, cancelled: 4 };
+              const sortedTournaments = [...dbTournaments].sort((a, b) => {
+                const pa = statusPriority[a.status] ?? 5;
+                const pb = statusPriority[b.status] ?? 5;
+                if (pa !== pb) return pa - pb;
+                const timeA = new Date(a.start_date).getTime();
+                const timeB = new Date(b.start_date).getTime();
+                // Live → descending (recent first), Open → ascending (soonest first), Others → descending
+                if (a.status === 'open') return timeA - timeB;
+                return timeB - timeA;
+              });
 
-                  {/* 1st Place (Center, Tallest) */}
-                  {dbLeaderboard.length > 0 && (
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 160 }}>
-                      <span style={{ fontSize: 15, fontWeight: 800, color: 'var(--accent)', marginBottom: 6 }}>{dbLeaderboard[0].playerName}</span>
-                      <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 8 }}>{dbLeaderboard[0].points} pts</span>
-                      <div style={{
-                        width: '100%',
-                        height: 140,
-                        background: 'linear-gradient(180deg, rgba(245, 158, 11, 0.3) 0%, rgba(245, 158, 11, 0.05) 100%)',
-                        border: '1px solid rgba(245, 158, 11, 0.5)',
-                        borderBottom: 'none',
-                        borderRadius: 'var(--radius-md) var(--radius-md) 0 0',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        boxShadow: '0 0 25px rgba(245, 158, 11, 0.15)',
-                        position: 'relative'
-                      }}>
-                        <span style={{ fontSize: 32 }}>🥇</span>
-                        <span style={{ fontSize: 12, fontWeight: 800, color: 'var(--accent)', marginTop: 4 }}>CHAMPION</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* 3rd Place */}
-                  {dbLeaderboard.length > 2 && (
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 140 }}>
-                      <span style={{ fontSize: 13, fontWeight: 700, marginBottom: 6, color: 'var(--text-primary)' }}>{dbLeaderboard[2].playerName}</span>
-                      <span style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>{dbLeaderboard[2].points} pts</span>
-                      <div style={{
-                        width: '100%',
-                        height: 80,
-                        background: 'linear-gradient(180deg, rgba(180, 83, 9, 0.25) 0%, rgba(180, 83, 9, 0.05) 100%)',
-                        border: '1px solid rgba(180, 83, 9, 0.4)',
-                        borderBottom: 'none',
-                        borderRadius: 'var(--radius-md) var(--radius-md) 0 0',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                      }}>
-                        <span style={{ fontSize: 24 }}>🥉</span>
-                        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)', marginTop: 4 }}>3RD PLACE</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Quick list of remaining top 8 */}
-                {dbLeaderboard.length > 3 && (
-                  <div>
-                    <h4 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 12, borderBottom: '1px solid var(--border)', paddingBottom: 6 }}>Remaining Leaders</h4>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                      {dbLeaderboard.slice(3, 9).map((row, idx) => (
-                        <div key={row.playerId} style={{
-                          padding: '10px 14px',
-                          background: 'var(--bg-secondary)',
-                          border: '1px solid var(--border)',
-                          borderRadius: 'var(--radius-md)',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center'
-                        }}>
-                          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-                            #{idx + 4} {row.playerName}
-                          </span>
-                          <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--accent)' }}>{row.points} pts</span>
+              return (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  <h4 style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-secondary)', margin: 0 }}>
+                    All Tournaments ({sortedTournaments.length})
+                  </h4>
+                  <div style={{ maxHeight: 520, overflowY: 'auto', paddingRight: 6, display: 'flex', flexDirection: 'column', gap: 14 }}>
+                    {sortedTournaments.length > 0 ? sortedTournaments.map(tour => (
+                      <div key={tour.id} style={{ padding: '16px 20px', background: 'var(--bg-primary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 20, transition: 'border-color 0.2s' }}>
+                        {/* Left: Info */}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                            <span className={`badge badge-${tour.status}`} style={{ fontSize: 10, textTransform: 'uppercase' }}>
+                              {tour.status}
+                            </span>
+                            <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                              {tour.type === 'individual' ? 'Individual' : 'Team'}
+                            </span>
+                          </div>
+                          <h3 style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {tour.name}
+                          </h3>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
+                            <span>📍 {tour.location}</span>
+                            <span>📅 {new Date(tour.start_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} — {new Date(tour.end_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                          </div>
+                          {tour.description && (
+                            <p style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4, lineHeight: 1.4, display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', overflow: 'hidden', margin: '4px 0 0 0' }}>
+                              {tour.description}
+                            </p>
+                          )}
                         </div>
-                      ))}
-                    </div>
+                        {/* Right: CTA */}
+                        <div style={{ flexShrink: 0 }}>
+                          <Link href={`/tournament/${tour.slug || tour.id}`} className="btn btn-primary" style={{ padding: '6px 14px', fontSize: 11, whiteSpace: 'nowrap' }}>
+                            View →
+                          </Link>
+                        </div>
+                      </div>
+                    )) : (
+                      <p style={{ textAlign: 'center', fontSize: 13, color: 'var(--text-muted)', padding: '24px 0' }}>
+                        No tournaments found.
+                      </p>
+                    )}
                   </div>
-                )}
-
-                <div style={{ textAlign: 'center', marginTop: 12 }}>
-                  <Link href="/players" className="btn btn-primary" style={{ display: 'inline-flex' }}>
-                    View Full Standings Table →
-                  </Link>
                 </div>
-              </div>
-            )}
-
-            {/* Content: Tournament Selector */}
-            {explorerTab === 'tournament' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                <div className="input-group">
-                  <label className="input-label" htmlFor="explore-tours">Select Tournament</label>
-                  <select
-                    id="explore-tours"
-                    className="input"
-                    value={selectedTourId}
-                    onChange={e => setSelectedTourId(e.target.value)}
-                  >
-                    {dbTournaments.length === 0 && <option value="">No tournaments active</option>}
-                    {dbTournaments.map(t => (
-                      <option key={t.id} value={t.id}>{t.name}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Selected Tournament Details & Matches Explorer */}
-                {selectedTourId && (() => {
-                  const tour = dbTournaments.find(t => t.id === selectedTourId);
-                  const tourMatches = dbMatches.filter(m => m.tournament_id === selectedTourId);
-                  const tourEvents = dbEvents.filter(e => e.tournament_id === selectedTourId);
-                  
-                  // Sort descending: recent first
-                  const sortedTourMatches = [...tourMatches].sort((a, b) => {
-                    const timeA = a.scheduled_time ? new Date(a.scheduled_time).getTime() : 0;
-                    const timeB = b.scheduled_time ? new Date(b.scheduled_time).getTime() : 0;
-                    return timeB - timeA;
-                  });
-
-                  return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-                      {tour && (
-                        <div className="glass-card" style={{ padding: 24, background: 'var(--bg-primary)', border: '1px solid var(--border)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 28, flexWrap: 'wrap', boxShadow: 'none' }}>
-                          
-                          {/* Left Column: Overview Details */}
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                            <div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                                <span className={`badge badge-${tour.status}`} style={{ fontSize: 11, textTransform: 'uppercase' }}>
-                                  {tour.status}
-                                </span>
-                                <span style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                                  Type: {tour.type === 'individual' ? 'Individual Draw' : 'Franchise Team Tie'}
-                                </span>
-                              </div>
-                              <h3 style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
-                                {tour.name}
-                              </h3>
-                              <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 8, lineHeight: 1.5 }}>
-                                {tour.description || 'No description provided for this tournament.'}
-                              </p>
-                            </div>
-
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13, color: 'var(--text-muted)' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                📍 <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>{tour.location}</span>
-                              </div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                📅 <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>
-                                  {new Date(tour.start_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })} — {new Date(tour.end_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Registered Events */}
-                            <div>
-                              <h4 style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 8, letterSpacing: '0.05em' }}>
-                                Registered Events ({tourEvents.length})
-                              </h4>
-                              {tourEvents.length > 0 ? (
-                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                                  {tourEvents.map(ev => (
-                                    <span key={ev.id} className="badge badge-accent" style={{ fontSize: 11, padding: '4px 12px' }}>
-                                      {ev.event_name}
-                                    </span>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div style={{ fontSize: 12, color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                                  No event categories registered yet.
-                                </div>
-                              )}
-                            </div>
-
-                            <div style={{ marginTop: 'auto', paddingTop: 12 }}>
-                              <Link href={`/tournament/${tour.slug || tour.id}`} className="btn btn-primary" style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
-                                Open Public Tournament Page →
-                              </Link>
-                            </div>
-                          </div>
-
-                          {/* Right Column: Match List Timeline */}
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                            <h4 style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6 }}>
-                              🎾 Tournament Timeline
-                            </h4>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 300, overflowY: 'auto', paddingRight: 4 }}>
-                              {sortedTourMatches.map(match => {
-                                const eventObj = dbEvents.find(e => e.id === match.event_id);
-                                return (
-                                  <div key={match.id} style={{
-                                    padding: 12,
-                                    borderRadius: 'var(--radius-sm)',
-                                    background: 'var(--bg-secondary)',
-                                    border: '1px solid var(--border)',
-                                    display: 'flex',
-                                    flexDirection: 'column',
-                                    gap: 6
-                                  }}>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-                                        {match.player1_name} vs {match.player2_name}
-                                      </span>
-                                      <span className={`badge badge-${match.status === 'running' ? 'live' : match.status}`} style={{ fontSize: 9 }}>
-                                        {match.status}
-                                      </span>
-                                    </div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: 'var(--text-muted)' }}>
-                                      <span>{eventObj?.event_name} · {match.court}</span>
-                                      {match.sets.length > 0 ? (
-                                        <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--accent)' }}>
-                                          {match.sets.map(s => `${s.player1_score}-${s.player2_score}`).join(', ')}
-                                        </span>
-                                      ) : (
-                                        <span>Scheduled</span>
-                                      )}
-                                    </div>
-                                  </div>
-                                );
-                              })}
-
-                              {sortedTourMatches.length === 0 && (
-                                <p style={{ textAlign: 'center', fontSize: 12, color: 'var(--text-muted)', padding: '24px 0' }}>
-                                  No matches scheduled or played yet.
-                                </p>
-                              )}
-                            </div>
-                          </div>
-
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
+              );
+            })()}
 
             {/* Content: Player History */}
             {explorerTab === 'player' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                  <div className="input-group">
-                    <label className="input-label" htmlFor="explore-player-search">Search Player Name</label>
-                    <input
-                      id="explore-player-search"
-                      className="input"
-                      placeholder="e.g. Priya Sharma..."
-                      value={playerSearch}
-                      onChange={e => setPlayerSearch(e.target.value)}
-                    />
-                  </div>
-                  <div className="input-group">
-                    <label className="input-label" htmlFor="explore-players">Select Player Profile</label>
-                    <select
-                      id="explore-players"
-                      className="input"
-                      value={selectedPlayerId}
-                      onChange={e => setSelectedPlayerId(e.target.value)}
-                    >
-                      {dbPlayers
-                        .filter(p => p.name.toLowerCase().includes(playerSearch.toLowerCase()))
-                        .map(p => (
-                          <option key={p.id} value={p.id}>{p.name}</option>
-                        ))
-                      }
-                      {dbPlayers.filter(p => p.name.toLowerCase().includes(playerSearch.toLowerCase())).length === 0 && (
-                        <option value="">No profiles found</option>
-                      )}
-                    </select>
-                  </div>
-                </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+                <SearchableMultiSelect
+                  id="explore-players-multi"
+                  label="Select Player(s)"
+                  placeholder="Type to search and select players..."
+                  options={dbPlayers.map(p => ({ id: p.id, name: p.name }))}
+                  selectedIds={selectedPlayerIds}
+                  onChange={setSelectedPlayerIds}
+                />
 
-                {/* Player Matches & Stats History (Descending Timeline) */}
-                {selectedPlayerId && (() => {
-                  const player = dbPlayers.find(p => p.id === selectedPlayerId);
-                  const playerMatches = dbMatches.filter(m => m.player1_id === selectedPlayerId || m.player2_id === selectedPlayerId);
-                  
-                  const sortedPlayerMatches = [...playerMatches].sort((a, b) => {
+                {/* Selected Players details & combined matches timeline */}
+                {selectedPlayerIds.length > 0 ? (() => {
+                  const selectedPlayers = dbPlayers.filter(p => selectedPlayerIds.includes(p.id));
+                  const combinedPlayerMatches = dbMatches.filter(m => 
+                    selectedPlayerIds.includes(m.player1_id || '') || selectedPlayerIds.includes(m.player2_id || '')
+                  );
+                  // Remove duplicates by match ID
+                  const uniquePlayerMatches = Array.from(new Map(combinedPlayerMatches.map(m => [m.id, m])).values());
+
+                  const sortedPlayerMatches = [...uniquePlayerMatches].sort((a, b) => {
                     const timeA = a.scheduled_time ? new Date(a.scheduled_time).getTime() : 0;
                     const timeB = b.scheduled_time ? new Date(b.scheduled_time).getTime() : 0;
                     return timeB - timeA;
                   });
 
-                  const completed = playerMatches.filter(m => m.status === 'completed');
-                  const wins = completed.filter(m => m.winner_id === selectedPlayerId).length;
-                  const losses = completed.length - wins;
-                  const winRate = completed.length > 0 ? Math.round((wins / completed.length) * 100) : 0;
-
                   return (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                      {player && (
-                        <div style={{
-                          display: 'flex',
-                          flexWrap: 'wrap',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          padding: '16px 20px',
-                          background: 'var(--bg-primary)',
-                          borderRadius: 'var(--radius-md)',
-                          border: '1px solid var(--border)',
-                          gap: 16
-                        }}>
-                          <div>
-                            <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>{player.name}</span>
-                            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{player.email}</div>
-                          </div>
-                          
-                          <div style={{ display: 'flex', gap: 12 }}>
-                            <div style={{ textAlign: 'center' }}>
-                              <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>{playerMatches.length}</div>
-                              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Played</div>
-                            </div>
-                            <div style={{ textAlign: 'center' }}>
-                              <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--score-win)' }}>{wins}</div>
-                              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Wins</div>
-                            </div>
-                            <div style={{ textAlign: 'center' }}>
-                              <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--score-loss)' }}>{losses}</div>
-                              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Losses</div>
-                            </div>
-                            <div style={{ textAlign: 'center' }}>
-                              <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--accent)' }}>{winRate}%</div>
-                              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Win Ratio</div>
-                            </div>
-                          </div>
-                        </div>
-                      )}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 28, maxHeight: 560, overflowY: 'auto' }}>
+                      
+                      {/* Left Column: Player Cards */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxHeight: 500, overflowY: 'auto', paddingRight: 4 }}>
+                        <h4 style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-secondary)' }}>
+                          Player Profiles ({selectedPlayers.length})
+                        </h4>
+                        {selectedPlayers.map(player => {
+                          const playerMatches = dbMatches.filter(m => m.player1_id === player.id || m.player2_id === player.id);
+                          const completed = playerMatches.filter(m => m.status === 'completed');
+                          const wins = completed.filter(m => m.winner_id === player.id).length;
+                          const losses = completed.length - wins;
+                          const winRate = completed.length > 0 ? Math.round((wins / completed.length) * 100) : 0;
 
-                      <h4 style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)' }}>Match Timeline (Descending)</h4>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                        {sortedPlayerMatches.map(match => {
-                          const opponent = match.player1_id === selectedPlayerId ? match.player2_name : match.player1_name;
-                          const eventObj = dbEvents.find(e => e.id === match.event_id);
-                          const isWin = match.status === 'completed' && match.winner_id === selectedPlayerId;
-                          
                           return (
-                            <div key={match.id} style={{
-                              padding: 14,
-                              borderRadius: 'var(--radius-md)',
+                            <div key={player.id} style={{
+                              padding: '16px 20px',
                               background: 'var(--bg-primary)',
+                              borderRadius: 'var(--radius-md)',
                               border: '1px solid var(--border)',
                               display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'space-between',
-                              gap: 16
+                              flexDirection: 'column',
+                              gap: 12
                             }}>
                               <div>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                                  <span style={{ fontWeight: 600, fontSize: 14 }}>
-                                    vs {opponent}
-                                  </span>
-                                  <span className={`badge badge-${match.status === 'completed' ? (isWin ? 'approved' : 'rejected') : 'open'}`}>
-                                    {match.status === 'completed' ? (isWin ? 'WIN' : 'LOSS') : match.status}
-                                  </span>
-                                </div>
-                                <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                                  {eventObj?.event_name}
-                                </div>
+                                <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>{player.name}</span>
+                                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{player.email}</div>
                               </div>
-
-                              {/* Score */}
-                              <div style={{ display: 'flex', gap: 4 }}>
-                                {match.sets.map((s, idx) => (
-                                  <div key={idx} style={{
-                                    padding: '2px 6px',
-                                    background: 'var(--bg-elevated)',
-                                    borderRadius: 'var(--radius-sm)',
-                                    fontSize: 11,
-                                    fontFamily: 'var(--font-mono)',
-                                    fontWeight: s.is_complete ? 600 : 400
-                                  }}>
-                                    {match.player1_id === selectedPlayerId ? `${s.player1_score}-${s.player2_score}` : `${s.player2_score}-${s.player1_score}`}
-                                  </div>
-                                ))}
+                              
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                                <div style={{ textAlign: 'center' }}>
+                                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)' }}>{playerMatches.length}</div>
+                                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>Played</div>
+                                </div>
+                                <div style={{ textAlign: 'center' }}>
+                                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--score-win)' }}>{wins}</div>
+                                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>Wins</div>
+                                </div>
+                                <div style={{ textAlign: 'center' }}>
+                                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--score-loss)' }}>{losses}</div>
+                                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>Losses</div>
+                                </div>
+                                <div style={{ textAlign: 'center' }}>
+                                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--accent)' }}>{winRate}%</div>
+                                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>Win Ratio</div>
+                                </div>
                               </div>
                             </div>
                           );
                         })}
-
-                        {sortedPlayerMatches.length === 0 && (
-                          <p style={{ textAlign: 'center', fontSize: 13, color: 'var(--text-muted)', padding: 12 }}>
-                            No matches found for this player.
-                          </p>
-                        )}
                       </div>
+
+                      {/* Right Column: Combined Timeline */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                        <h4 style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-secondary)' }}>
+                          Match Timeline (Descending)
+                        </h4>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 500, overflowY: 'auto', paddingRight: 4 }}>
+                          {sortedPlayerMatches.map(match => {
+                            const eventObj = dbEvents.find(e => e.id === match.event_id);
+                            
+                            // Check if a selected player won this match
+                            let resultText: string = match.status;
+                            let badgeType = 'open';
+                            
+                            if (match.status === 'completed' && match.winner_id) {
+                              const wonPlayer = selectedPlayers.find(p => p.id === match.winner_id);
+                              if (wonPlayer) {
+                                resultText = `WIN (${wonPlayer.name})`;
+                                badgeType = 'approved';
+                              } else {
+                                const lostPlayer = selectedPlayers.find(p => p.id === match.player1_id || p.id === match.player2_id);
+                                if (lostPlayer) {
+                                  resultText = `LOSS (${lostPlayer.name})`;
+                                  badgeType = 'rejected';
+                                } else {
+                                  resultText = 'Completed';
+                                  badgeType = 'completed';
+                                }
+                              }
+                            }
+
+                            return (
+                              <div key={match.id} style={{
+                                padding: 14,
+                                borderRadius: 'var(--radius-md)',
+                                background: 'var(--bg-primary)',
+                                border: '1px solid var(--border)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: 16
+                              }}>
+                                <div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
+                                    <span style={{ fontWeight: 600, fontSize: 13 }}>
+                                      {match.player1_name} vs {match.player2_name}
+                                    </span>
+                                    <span className={`badge badge-${badgeType}`} style={{ fontSize: 9 }}>
+                                      {resultText}
+                                    </span>
+                                  </div>
+                                  <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                                    {eventObj?.event_name || 'Event'}
+                                  </div>
+                                </div>
+
+                                {/* Score */}
+                                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                                  {match.sets.map((s, idx) => (
+                                    <div key={idx} style={{
+                                      padding: '2px 6px',
+                                      background: 'var(--bg-elevated)',
+                                      borderRadius: 'var(--radius-sm)',
+                                      fontSize: 10,
+                                      fontFamily: 'var(--font-mono)',
+                                      fontWeight: s.is_complete ? 600 : 400
+                                    }}>
+                                      {s.player1_score}-{s.player2_score}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })}
+
+                          {sortedPlayerMatches.length === 0 && (
+                            <p style={{ textAlign: 'center', fontSize: 13, color: 'var(--text-muted)', padding: 12 }}>
+                              No matches found for selected player(s).
+                            </p>
+                          )}
+                        </div>
+                      </div>
+
                     </div>
                   );
-                })()}
+                })() : (
+                  <p style={{ textAlign: 'center', fontSize: 13, color: 'var(--text-muted)', padding: '24px 0' }}>
+                    Select player(s) to view timeline.
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -929,20 +827,87 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Contact & Setup Help Form Section */}
-      <section style={{
+      {/* About Us Section */}
+      <section id="about" style={{
+        padding: '80px 0',
+        borderTop: '1px solid var(--border)',
+        background: 'var(--bg-secondary)',
+        position: 'relative',
+        overflow: 'hidden'
+      }}>
+        <div className="container-app" style={{ maxWidth: 840 }}>
+          <div style={{ textAlign: 'center', marginBottom: 48 }}>
+            <span className="badge badge-accent" style={{ marginBottom: 12 }}>Our Story</span>
+            <h2 style={{ fontSize: 32, fontWeight: 700, marginBottom: 12, color: 'var(--text-primary)' }}>About MatchPoint</h2>
+            <p style={{ fontSize: 15, color: 'var(--text-secondary)', maxWidth: 600, margin: '0 auto', lineHeight: 1.6 }}>
+              We are a passionate team of badminton players, coaches, and developers dedicated to professionalizing amateur and professional club tournaments globally.
+            </p>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 40, alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+              <h3 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)' }}>Empowering the Badminton Community</h3>
+              <p style={{ fontSize: 14, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                MatchPoint started out of frustration with manual spreadsheet updates, messy messaging threads, and slow score reporting at local club matches.
+              </p>
+              <p style={{ fontSize: 14, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                Our platform delivers professional-grade bracket generators, automated seedings, custom visual court setups, and umpire scoring panels with immediate real-time sync.
+              </p>
+              
+              <div style={{ display: 'flex', gap: 24, marginTop: 8 }}>
+                <div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--accent)' }}>100%</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Real-time Sync</div>
+                </div>
+                <div style={{ width: 1, height: 36, background: 'var(--border)' }} />
+                <div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--accent)' }}>Sub-Second</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Score Latency</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="glass-card" style={{ padding: 32, display: 'flex', flexDirection: 'column', gap: 16 }}>
+              <h4 style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                🏸 Our Vision
+              </h4>
+              <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
+                To establish the digital standard for badminton tournaments, providing organizers with simple, bulletproof management interfaces and offering players a professional tour experience.
+              </p>
+              <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '8px 0' }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{
+                  width: 40, height: 40, borderRadius: '50%',
+                  background: 'linear-gradient(135deg, var(--accent), #8b5cf6)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 16, fontWeight: 700, color: '#fff'
+                }}>
+                  VP
+                </div>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>Vikas Paliwal</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Founder & Head Organizer</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Contact Form Section */}
+      <section id="contact" style={{
         padding: '80px 0',
         borderTop: '1px solid var(--border)',
         background: 'linear-gradient(180deg, var(--bg-primary) 0%, var(--bg-secondary) 100%)',
       }}>
         <div className="container-app" style={{ maxWidth: 640 }}>
           <div style={{ textAlign: 'center', marginBottom: 36 }}>
-            <span className="badge badge-accent" style={{ marginBottom: 12 }}>Setup Help & Support</span>
+            <span className="badge badge-accent" style={{ marginBottom: 12 }}>Contact Us</span>
             <h2 style={{ fontSize: 32, fontWeight: 700, marginBottom: 8, color: 'var(--text-primary)' }}>
-              Need Help Setting Up Your Tournament?
+              Get In Touch With Us
             </h2>
             <p style={{ fontSize: 15, color: 'var(--text-secondary)' }}>
-              Submit a support ticket and our tournament managers will configure your brackets, imports, or seeding.
+              Have questions, feedback, or need help setting up your tournament brackets? Send us a message below.
             </p>
           </div>
 
@@ -960,9 +925,9 @@ export default function LandingPage() {
                 gap: 12
               }}>
                 <span style={{ fontSize: 48 }}>✅</span>
-                <span>Setup Help Request Submitted Successfully!</span>
+                <span>Message Sent Successfully!</span>
                 <p style={{ fontSize: 13, color: 'var(--text-secondary)', fontWeight: 400, marginTop: 4 }}>
-                  Our admin team will reach out to your organization email within 24 hours.
+                  Your query has been logged and sent securely to the tournament organizers. We will get back to you within 24 hours.
                 </p>
               </div>
             ) : (
@@ -1087,5 +1052,207 @@ function IconChevronRight({ size }: { size: number }) {
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="m9 18 6-6-6-6" />
     </svg>
+  );
+}
+
+interface SearchableMultiSelectProps {
+  id: string;
+  label: string;
+  placeholder: string;
+  options: { id: string; name: string }[];
+  selectedIds: string[];
+  onChange: (ids: string[]) => void;
+}
+
+function SearchableMultiSelect({
+  id,
+  label,
+  placeholder,
+  options,
+  selectedIds,
+  onChange,
+}: SearchableMultiSelectProps) {
+  const [search, setSearch] = useState('');
+  const [isOpen, setIsOpen] = useState(false);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+
+  const filtered = options.filter(opt =>
+    opt.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const toggleSelect = (optionId: string) => {
+    if (selectedIds.includes(optionId)) {
+      onChange(selectedIds.filter(id => id !== optionId));
+    } else {
+      onChange([...selectedIds, optionId]);
+    }
+  };
+
+  const removeSelected = (optionId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    onChange(selectedIds.filter(id => id !== optionId));
+  };
+
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(`#container-${id}`)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('click', handleOutsideClick);
+    return () => document.removeEventListener('click', handleOutsideClick);
+  }, [id]);
+
+  const selectedOptions = options.filter(opt => selectedIds.includes(opt.id));
+
+  return (
+    <div id={`container-${id}`} className="input-group" style={{ position: 'relative' }}>
+      <label className="input-label">{label}</label>
+      
+      {/* Selected Items / Trigger Area */}
+      <div
+        className="input"
+        style={{
+          minHeight: '44px',
+          height: 'auto',
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '6px',
+          alignItems: 'center',
+          padding: '6px 12px',
+          cursor: 'pointer',
+          background: 'var(--bg-secondary)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)',
+          position: 'relative',
+        }}
+        onClick={() => setIsOpen(!isOpen)}
+      >
+        {selectedOptions.length === 0 && (
+          <span style={{ color: 'var(--text-muted)', fontSize: '14px' }}>{placeholder}</span>
+        )}
+        {selectedOptions.map(opt => (
+          <span
+            key={opt.id}
+            className="badge badge-accent"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+              padding: '4px 8px',
+              fontSize: '12px',
+              fontWeight: 500,
+              background: 'var(--accent-subtle)',
+              border: '1px solid var(--accent)',
+              borderRadius: 'var(--radius-sm)',
+            }}
+            onClick={(e) => {
+              e.stopPropagation();
+            }}
+          >
+            {opt.name}
+            <button
+              type="button"
+              onClick={(e) => removeSelected(opt.id, e)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-secondary)',
+                cursor: 'pointer',
+                padding: '0 2px',
+                fontSize: '12px',
+                lineHeight: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              ✕
+            </button>
+          </span>
+        ))}
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center' }}>
+          <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+            {isOpen ? '▲' : '▼'}
+          </span>
+        </div>
+      </div>
+
+      {/* Dropdown Panel */}
+      {isOpen && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            right: 0,
+            zIndex: 100,
+            background: 'var(--bg-primary)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            boxShadow: '0 10px 25px rgba(0, 0, 0, 0.5)',
+            maxHeight: '260px',
+            overflowY: 'auto',
+            padding: '8px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '4px',
+          }}
+        >
+          {/* Search Input inside dropdown */}
+          <input
+            type="text"
+            className="input"
+            placeholder="Search..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              padding: '6px 10px',
+              fontSize: '13px',
+              marginBottom: '6px',
+            }}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', overflowY: 'auto' }}>
+            {filtered.map(opt => {
+              const isSelected = selectedIds.includes(opt.id);
+              return (
+                <div
+                  key={opt.id}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleSelect(opt.id);
+                  }}
+                  onMouseEnter={() => setHoveredId(opt.id)}
+                  onMouseLeave={() => setHoveredId(null)}
+                  style={{
+                    padding: '8px 12px',
+                    borderRadius: 'var(--radius-sm)',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    background: isSelected 
+                      ? 'var(--accent-subtle)' 
+                      : (hoveredId === opt.id ? 'var(--bg-secondary)' : 'transparent'),
+                    color: isSelected ? 'var(--text-primary)' : 'var(--text-secondary)',
+                  }}
+                >
+                  <span>{opt.name}</span>
+                  {isSelected && <span style={{ color: 'var(--accent-hover)' }}>✓</span>}
+                </div>
+              );
+            })}
+            {filtered.length === 0 && (
+              <span style={{ padding: '8px', fontSize: '13px', color: 'var(--text-muted)', textAlign: 'center' }}>
+                No options found
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

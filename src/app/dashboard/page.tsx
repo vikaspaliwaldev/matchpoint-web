@@ -2,8 +2,10 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
-import { Tournament, TournamentEvent, Registration, Match } from '@/types';
+import ShuttlecockLoader from '@/components/ShuttlecockLoader';
+import { Tournament, TournamentEvent, Registration, Match, User } from '@/types';
 import * as dbService from '@/lib/supabase-service';
 import {
   mockDashboardStats,
@@ -24,6 +26,7 @@ import {
   IconChevronRight,
   IconClock,
   IconMapPin,
+  IconX,
 } from '@/components/icons';
 
 export default function DashboardPage() {
@@ -69,9 +72,8 @@ function AdminDashboard() {
 
   if (loading) {
     return (
-      <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-secondary)' }}>
-        <div className="animate-spin" style={{ display: 'inline-block', fontSize: 24, marginBottom: 12, animation: 'spin 2s linear infinite' }}>🔄</div>
-        <p style={{ fontSize: 15, fontWeight: 500 }}>Loading Admin Dashboard...</p>
+      <div className="glass-card" style={{ padding: 48 }}>
+        <ShuttlecockLoader message="Loading Admin Dashboard..." />
       </div>
     );
   }
@@ -304,9 +306,8 @@ function PlayerDashboard({ userId }: { userId: string }) {
 
   if (loading) {
     return (
-      <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-secondary)' }}>
-        <div className="animate-spin" style={{ display: 'inline-block', fontSize: 24, marginBottom: 12, animation: 'spin 2s linear infinite' }}>🔄</div>
-        <p style={{ fontSize: 15, fontWeight: 500 }}>Loading Player Dashboard...</p>
+      <div className="glass-card" style={{ padding: 48 }}>
+        <ShuttlecockLoader message="Loading Player Dashboard..." />
       </div>
     );
   }
@@ -489,6 +490,7 @@ function UmpireDashboard() {
   const [assignedMatches, setAssignedMatches] = useState<Match[]>([]);
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [events, setEvents] = useState<TournamentEvent[]>([]);
+  const [showAdHocModal, setShowAdHocModal] = useState(false);
 
   useEffect(() => {
     if (!user) return;
@@ -515,9 +517,8 @@ function UmpireDashboard() {
 
   if (loading) {
     return (
-      <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-secondary)' }}>
-        <div className="animate-spin" style={{ display: 'inline-block', fontSize: 24, marginBottom: 12, animation: 'spin 2s linear infinite' }}>🔄</div>
-        <p style={{ fontSize: 15, fontWeight: 500 }}>Loading Umpire Dashboard...</p>
+      <div className="glass-card" style={{ padding: 48 }}>
+        <ShuttlecockLoader message="Loading Umpire Dashboard..." />
       </div>
     );
   }
@@ -530,10 +531,26 @@ function UmpireDashboard() {
 
   return (
     <div>
-      <div style={{ marginBottom: 28 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 700 }}>Umpire Dashboard</h1>
-        <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 4 }}>Score matches and manage live games</p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 28, flexWrap: 'wrap', gap: 16 }}>
+        <div>
+          <h1 style={{ fontSize: 28, fontWeight: 700 }}>Umpire Dashboard</h1>
+          <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 4 }}>Score matches and manage live games</p>
+        </div>
+        <button
+          className="btn btn-primary"
+          onClick={() => setShowAdHocModal(true)}
+          style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+        >
+          ⚡ New Ad-hoc Match
+        </button>
       </div>
+
+      {showAdHocModal && (
+        <AdHocMatchModal
+          onClose={() => setShowAdHocModal(false)}
+          umpire={user}
+        />
+      )}
 
       {/* Quick Stats */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 32 }}>
@@ -632,6 +649,539 @@ function UmpireDashboard() {
             })}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Ad-Hoc Match Creation Modal ───────────────────────────
+
+interface AdHocMatchModalProps {
+  onClose: () => void;
+  umpire: any;
+}
+
+function AdHocMatchModal({ onClose, umpire }: AdHocMatchModalProps) {
+  const router = useRouter();
+  const [format, setFormat] = useState<'singles' | 'doubles'>('singles');
+  const [adhocType, setAdhocType] = useState<string>('practice');
+  const [scoringFormat, setScoringFormat] = useState<string>('21-point');
+  const [court, setCourt] = useState<string>('Court 1');
+
+  // Player fields
+  const [p1Search, setP1Search] = useState('');
+  const [p1Id, setP1Id] = useState('');
+  const [p2Search, setP2Search] = useState('');
+  const [p2Id, setP2Id] = useState('');
+
+  // Doubles partners
+  const [p1PartnerSearch, setP1PartnerSearch] = useState('');
+  const [p1PartnerId, setP1PartnerId] = useState('');
+  const [p2PartnerSearch, setP2PartnerSearch] = useState('');
+  const [p2PartnerId, setP2PartnerId] = useState('');
+
+  const [players, setPlayers] = useState<User[]>([]);
+  const [loadingPlayers, setLoadingPlayers] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Active dropdown index to track which input's dropdown is visible
+  const [activeDropdown, setActiveDropdown] = useState<'p1' | 'p2' | 'p1p' | 'p2p' | null>(null);
+
+  useEffect(() => {
+    async function fetchPlayers() {
+      try {
+        setLoadingPlayers(true);
+        const data = await dbService.getPlayers();
+        setPlayers(data);
+      } catch (err) {
+        console.error('Failed to load players directory:', err);
+      } finally {
+        setLoadingPlayers(false);
+      }
+    }
+    fetchPlayers();
+  }, []);
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setError(null);
+
+    // Resolve Player 1 Name & ID
+    const name1 = p1Search.trim() || 'Player 1';
+    const id1 = p1Id || `adhoc-p1-${Date.now()}`;
+
+    // Resolve Player 2 Name & ID (Team 2 Singles, or Team 1 Doubles Partner)
+    const name2 = p2Search.trim() || 'Player 2';
+    const id2 = p2Id || `adhoc-p2-${Date.now()}`;
+
+    // Validate uniqueness of players
+    if (format === 'singles') {
+      const isSameId = p1Id && p2Id && p1Id === p2Id;
+      const isSameName = name1.toLowerCase() === name2.toLowerCase();
+      if (isSameId || isSameName) {
+        setError('Player 1 and Player 2 must be different.');
+        setSubmitting(false);
+        return;
+      }
+    } else {
+      // Doubles
+      const p1pName = p1PartnerSearch.trim() || 'Player 2';
+      const p1pId = p1PartnerId || `adhoc-p1p-${Date.now()}`;
+
+      const p2pName = p2PartnerSearch.trim() || 'Player 4';
+      const p2pId = p2PartnerId || `adhoc-p2p-${Date.now()}`;
+
+      const names = [
+        name1.toLowerCase(),
+        p1pName.toLowerCase(),
+        name2.toLowerCase(),
+        p2pName.toLowerCase()
+      ];
+
+      const ids = [id1, p1pId, id2, p2pId];
+
+      // Check unique names
+      const uniqueNames = new Set(names);
+      if (uniqueNames.size !== names.length) {
+        setError('All 4 players in a doubles match must be different.');
+        setSubmitting(false);
+        return;
+      }
+
+      // Check unique IDs
+      const uniqueIds = new Set(ids);
+      if (uniqueIds.size !== ids.length) {
+        setError('All 4 players in a doubles match must be different.');
+        setSubmitting(false);
+        return;
+      }
+    }
+
+    try {
+      let player1NameCombined = name1;
+      let player1IdCombined = id1;
+      let player2NameCombined = name2;
+      let player2IdCombined = id2;
+
+      if (format === 'doubles') {
+        const p1pName = p1PartnerSearch.trim() || 'Player 2';
+        const p1pId = p1PartnerId || `adhoc-p1p-${Date.now()}`;
+
+        const p2pName = p2PartnerSearch.trim() || 'Player 4';
+        const p2pId = p2PartnerId || `adhoc-p2p-${Date.now()}`;
+
+        player1NameCombined = `${name1} / ${p1pName}`;
+        player1IdCombined = `${id1}/${p1pId}`;
+
+        // In doubles, Player 3 and Player 4 are Team 2
+        player2NameCombined = `${name2} / ${p2pName}`;
+        player2IdCombined = `${id2}/${p2pId}`;
+      }
+
+      const newMatch: Match = {
+        id: `adhoc-m-${Date.now()}`,
+        player1_id: player1IdCombined,
+        player1_name: player1NameCombined,
+        player2_id: player2IdCombined,
+        player2_name: player2NameCombined,
+        umpire_id: umpire.id,
+        umpire_name: umpire.name,
+        court: court,
+        status: 'scheduled',
+        sets: [],
+        is_adhoc: true,
+        adhoc_type: adhocType,
+        fixture_round: 0,
+        fixture_position: 0,
+        round_name: adhocType.charAt(0).toUpperCase() + adhocType.slice(1) + ' Match',
+      };
+
+      const savedMatch = await dbService.createMatch(newMatch);
+
+      // Audit Log: Ad-hoc match created
+      await dbService.logAction(
+        'Ad-hoc Match Created',
+        'match',
+        `Umpire ${umpire.name} created an adhoc ${format} ${adhocType} match: ${player1NameCombined} vs ${player2NameCombined}`,
+        umpire
+      );
+
+      // Redirect immediately to the scoring page using Next.js router
+      router.push(`/dashboard/scoring?matchId=${savedMatch.id}`);
+    } catch (err: any) {
+      console.error(err);
+      setError(err?.message || 'Failed to create ad-hoc match');
+      setSubmitting(false);
+    }
+  };
+
+  // Filter players list based on active input query
+  const getFilteredPlayers = (query: string, currentField: 'p1' | 'p2' | 'p1p' | 'p2p') => {
+    if (!query) return [];
+
+    const selectedIds: string[] = [];
+    if (currentField !== 'p1' && p1Id) selectedIds.push(p1Id);
+    if (currentField !== 'p2' && p2Id) selectedIds.push(p2Id);
+    if (currentField !== 'p1p' && p1PartnerId) selectedIds.push(p1PartnerId);
+    if (currentField !== 'p2p' && p2PartnerId) selectedIds.push(p2PartnerId);
+
+    return players.filter(p =>
+      !selectedIds.includes(p.id) &&
+      (p.name.toLowerCase().includes(query.toLowerCase()) ||
+       p.email.toLowerCase().includes(query.toLowerCase()))
+    ).slice(0, 5); // Limit to 5 suggestions
+  };
+
+  return (
+    <div style={{
+      position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+      background: 'rgba(10, 10, 12, 0.6)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
+      zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
+    }} onClick={onClose}>
+      <div style={{
+        background: '#ffffff', border: '1px solid rgba(0, 0, 0, 0.1)', borderRadius: 'var(--radius-lg)',
+        width: '100%', maxWidth: 540, maxHeight: '90vh', overflowY: 'auto',
+        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)', display: 'flex', flexDirection: 'column', position: 'relative'
+      }} onClick={e => e.stopPropagation()}>
+        {/* Close Button */}
+        <button 
+          onClick={onClose}
+          style={{
+            position: 'absolute', top: 16, right: 16, background: 'rgba(0, 0, 0, 0.05)',
+            border: 'none', borderRadius: '50%', width: 32, height: 32,
+            color: '#0f172a', fontSize: 14, cursor: 'pointer', display: 'flex',
+            alignItems: 'center', justifyContent: 'center', zIndex: 10
+          }}
+        >
+          <IconX size={14} />
+        </button>
+
+        {/* Header */}
+        <div style={{ padding: '24px 24px 16px', borderBottom: '1px solid var(--border)' }}>
+          <h2 style={{ fontSize: 20, fontWeight: 800, margin: 0, color: 'var(--text-primary)' }}>⚡ Create Ad-hoc Match</h2>
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 4 }}>Set up and score a quick practice or warmup match</p>
+        </div>
+
+        <form onSubmit={handleCreate} style={{ padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {error && <div style={{ color: '#ef4444', fontSize: 13, fontWeight: 500 }}>⚠️ {error}</div>}
+
+          {/* Match Settings Row */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div className="input-group">
+              <label className="input-label">Format</label>
+              <select className="input" value={format} onChange={e => setFormat(e.target.value as any)}>
+                <option value="singles">👤 Singles</option>
+                <option value="doubles">👥 Doubles</option>
+              </select>
+            </div>
+            <div className="input-group">
+              <label className="input-label">Type</label>
+              <select className="input" value={adhocType} onChange={e => setAdhocType(e.target.value)}>
+                <option value="practice">🏸 Practice</option>
+                <option value="warmup">🔥 Warmup</option>
+                <option value="friendly">🤝 Friendly</option>
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div className="input-group">
+              <label className="input-label">Scoring Format</label>
+              <select className="input" value={scoringFormat} onChange={e => setScoringFormat(e.target.value)}>
+                <option value="21-point">21-Point Standard</option>
+                <option value="15-point">15-Point Quick</option>
+                <option value="11-point">11-Point Blitz</option>
+              </select>
+            </div>
+            <div className="input-group">
+              <label className="input-label">Court / Location</label>
+              <input type="text" className="input" value={court} onChange={e => setCourt(e.target.value)} required />
+            </div>
+          </div>
+
+          {/* Player Selection Section */}
+          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
+            <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, color: 'var(--text-primary)' }}>
+              {format === 'singles' ? '👤 Player Selection' : '👥 Team Selection'}
+            </h4>
+
+            {format === 'singles' ? (
+              // Singles Fields
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {/* Player 1 */}
+                <div style={{ position: 'relative' }}>
+                  <label className="input-label">Player 1 (Left Side)</label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="Search or enter Player 1 name..."
+                    value={p1Search}
+                    onChange={e => {
+                      setP1Search(e.target.value);
+                      setP1Id('');
+                      setActiveDropdown('p1');
+                    }}
+                    onFocus={() => setActiveDropdown('p1')}
+                    onBlur={() => setTimeout(() => setActiveDropdown(null), 200)}
+                  />
+                  {activeDropdown === 'p1' && p1Search && (
+                    <div style={{
+                      position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', zIndex: 10,
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.1)', overflowY: 'auto', maxHeight: 200
+                    }}>
+                      {getFilteredPlayers(p1Search, 'p1').map(p => (
+                        <div
+                          key={p.id}
+                          style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border)', fontSize: 13 }}
+                          onMouseDown={() => {
+                            setP1Search(p.name);
+                            setP1Id(p.id);
+                            setActiveDropdown(null);
+                          }}
+                          onMouseOver={e => e.currentTarget.style.background = 'var(--bg-secondary)'}
+                          onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+                        >
+                          <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{p.email}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Player 2 */}
+                <div style={{ position: 'relative' }}>
+                  <label className="input-label">Player 2 (Right Side)</label>
+                  <input
+                    type="text"
+                    className="input"
+                    placeholder="Search or enter Player 2 name..."
+                    value={p2Search}
+                    onChange={e => {
+                      setP2Search(e.target.value);
+                      setP2Id('');
+                      setActiveDropdown('p2');
+                    }}
+                    onFocus={() => setActiveDropdown('p2')}
+                    onBlur={() => setTimeout(() => setActiveDropdown(null), 200)}
+                  />
+                  {activeDropdown === 'p2' && p2Search && (
+                    <div style={{
+                      position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', zIndex: 10,
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.1)', overflowY: 'auto', maxHeight: 200
+                    }}>
+                      {getFilteredPlayers(p2Search, 'p2').map(p => (
+                        <div
+                          key={p.id}
+                          style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border)', fontSize: 13 }}
+                          onMouseDown={() => {
+                            setP2Search(p.name);
+                            setP2Id(p.id);
+                            setActiveDropdown(null);
+                          }}
+                          onMouseOver={e => e.currentTarget.style.background = 'var(--bg-secondary)'}
+                          onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+                        >
+                          <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{p.email}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : (
+              // Doubles Fields
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {/* Team 1 */}
+                <div style={{ padding: 12, background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--accent)', textTransform: 'uppercase' }}>Team 1 (Left Side)</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
+                    {/* Player 1 */}
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        type="text"
+                        className="input"
+                        placeholder="Search or enter Player 1 name..."
+                        value={p1Search}
+                        onChange={e => {
+                          setP1Search(e.target.value);
+                          setP1Id('');
+                          setActiveDropdown('p1');
+                        }}
+                        onFocus={() => setActiveDropdown('p1')}
+                        onBlur={() => setTimeout(() => setActiveDropdown(null), 200)}
+                      />
+                      {activeDropdown === 'p1' && p1Search && (
+                        <div style={{
+                          position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', zIndex: 10,
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.1)', overflowY: 'auto', maxHeight: 150
+                        }}>
+                          {getFilteredPlayers(p1Search, 'p1').map(p => (
+                            <div
+                              key={p.id}
+                              style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border)', fontSize: 13 }}
+                              onMouseDown={() => {
+                                setP1Search(p.name);
+                                setP1Id(p.id);
+                                setActiveDropdown(null);
+                              }}
+                              onMouseOver={e => e.currentTarget.style.background = 'var(--bg-secondary)'}
+                              onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+                            >
+                              <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{p.email}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {/* Player 2 */}
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        type="text"
+                        className="input"
+                        placeholder="Search or enter Partner name..."
+                        value={p1PartnerSearch}
+                        onChange={e => {
+                          setP1PartnerSearch(e.target.value);
+                          setP1PartnerId('');
+                          setActiveDropdown('p1p');
+                        }}
+                        onFocus={() => setActiveDropdown('p1p')}
+                        onBlur={() => setTimeout(() => setActiveDropdown(null), 200)}
+                      />
+                      {activeDropdown === 'p1p' && p1PartnerSearch && (
+                        <div style={{
+                          position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', zIndex: 10,
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.1)', overflowY: 'auto', maxHeight: 150
+                        }}>
+                          {getFilteredPlayers(p1PartnerSearch, 'p1p').map(p => (
+                            <div
+                              key={p.id}
+                              style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border)', fontSize: 13 }}
+                              onMouseDown={() => {
+                                setP1PartnerSearch(p.name);
+                                setP1PartnerId(p.id);
+                                setActiveDropdown(null);
+                              }}
+                              onMouseOver={e => e.currentTarget.style.background = 'var(--bg-secondary)'}
+                              onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+                            >
+                              <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{p.email}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Team 2 */}
+                <div style={{ padding: 12, background: 'var(--bg-secondary)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--accent)', textTransform: 'uppercase' }}>Team 2 (Right Side)</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 8 }}>
+                    {/* Player 3 */}
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        type="text"
+                        className="input"
+                        placeholder="Search or enter Player 3 name..."
+                        value={p2Search}
+                        onChange={e => {
+                          setP2Search(e.target.value);
+                          setP2Id('');
+                          setActiveDropdown('p2');
+                        }}
+                        onFocus={() => setActiveDropdown('p2')}
+                        onBlur={() => setTimeout(() => setActiveDropdown(null), 200)}
+                      />
+                      {activeDropdown === 'p2' && p2Search && (
+                        <div style={{
+                          position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', zIndex: 10,
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.1)', overflowY: 'auto', maxHeight: 150
+                        }}>
+                          {getFilteredPlayers(p2Search, 'p2').map(p => (
+                            <div
+                              key={p.id}
+                              style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border)', fontSize: 13 }}
+                              onMouseDown={() => {
+                                setP2Search(p.name);
+                                setP2Id(p.id);
+                                setActiveDropdown(null);
+                              }}
+                              onMouseOver={e => e.currentTarget.style.background = 'var(--bg-secondary)'}
+                              onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+                            >
+                              <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{p.email}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {/* Player 4 */}
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        type="text"
+                        className="input"
+                        placeholder="Search or enter Partner name..."
+                        value={p2PartnerSearch}
+                        onChange={e => {
+                          setP2PartnerSearch(e.target.value);
+                          setP2PartnerId('');
+                          setActiveDropdown('p2p');
+                        }}
+                        onFocus={() => setActiveDropdown('p2p')}
+                        onBlur={() => setTimeout(() => setActiveDropdown(null), 200)}
+                      />
+                      {activeDropdown === 'p2p' && p2PartnerSearch && (
+                        <div style={{
+                          position: 'absolute', top: '100%', left: 0, right: 0, background: '#fff',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', zIndex: 10,
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.1)', overflowY: 'auto', maxHeight: 150
+                        }}>
+                          {getFilteredPlayers(p2PartnerSearch, 'p2p').map(p => (
+                            <div
+                              key={p.id}
+                              style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid var(--border)', fontSize: 13 }}
+                              onMouseDown={() => {
+                                setP2PartnerSearch(p.name);
+                                setP2PartnerId(p.id);
+                                setActiveDropdown(null);
+                              }}
+                              onMouseOver={e => e.currentTarget.style.background = 'var(--bg-secondary)'}
+                              onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+                            >
+                              <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{p.email}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Form Actions */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, borderTop: '1px solid var(--border)', paddingTop: 20, marginTop: 12 }}>
+            <button type="button" className="btn btn-secondary" onClick={onClose} disabled={submitting}>Cancel</button>
+            <button type="submit" className="btn btn-primary" disabled={submitting}>
+              {submitting ? 'Creating...' : '⚡ Start Scoring'}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

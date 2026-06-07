@@ -237,7 +237,7 @@ function ScoringInterface({
     if (isTeamMatch) {
       async function loadRosters() {
         try {
-          const teamList = await getTeamsByTournament(match.tournament_id);
+          const teamList = await getTeamsByTournament(match.tournament_id!);
           const playerList = await getPlayers();
           setTeams(teamList);
           setAllPlayers(playerList);
@@ -1579,7 +1579,7 @@ function ScoringInterface({
           <span style={{ fontSize: 18, fontWeight: 800, color: '#22c55e', textShadow: '0 0 8px rgba(34,197,94,0.35)' }}>Game {currentSetNumber}</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 11, color: '#94a3b8' }}>
-              {selectedCourt} · {tournament?.name || ''} · {event?.event_name || ''}
+              {selectedCourt} · {match.is_adhoc ? (match.round_name || 'Ad-hoc Match') : `${tournament?.name || ''}${event?.event_name ? ` · ${event.event_name}` : ''}`}
             </span>
             <button
               className="btn btn-ghost btn-icon"

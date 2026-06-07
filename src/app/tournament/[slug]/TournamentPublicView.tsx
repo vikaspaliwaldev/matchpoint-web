@@ -133,6 +133,12 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string>('all');
   const [predictions, setPredictions] = useState<Record<string, 'player1' | 'player2'>>({});
+  const [schedulePage, setSchedulePage] = useState(1);
+  const schedulePageSize = 10;
+
+  useEffect(() => {
+    setSchedulePage(1);
+  }, [selectedEventId]);
 
   // Bug Report / Feedback Portal States
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
@@ -332,6 +338,11 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
 
   const liveMatches = filteredScores.filter(m => m.status === 'running' || m.status === 'paused');
   const scheduledMatches = filteredScores.filter(m => m.status === 'scheduled');
+  
+  const totalScheduleItems = scheduledMatches.length;
+  const totalSchedulePages = Math.ceil(totalScheduleItems / schedulePageSize) || 1;
+  const paginatedScheduleMatches = scheduledMatches.slice((schedulePage - 1) * schedulePageSize, schedulePage * schedulePageSize);
+  
   const completedMatches = filteredScores.filter(m => m.status === 'completed');
 
   return (
@@ -403,20 +414,22 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
           </Link>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-            <h1 style={{ fontSize: 'clamp(24px, 4vw, 40px)', fontWeight: 800 }}>{tournament.name}</h1>
+            <h1 style={{ fontSize: 'clamp(24px, 4vw, 40px)', fontWeight: 800, color: '#ffffff' }}>{tournament.name}</h1>
             {tournament.status === 'live' && (
-              <span className="badge badge-live" style={{ fontSize: 12 }}>
-                <span className="live-dot" style={{ width: 6, height: 6 }} /> LIVE
+              <span className="badge" style={{ fontSize: 12, background: 'rgba(255,255,255,0.2)', color: '#ffffff', border: '1px solid rgba(255,255,255,0.25)' }}>
+                <span className="live-dot" style={{ width: 6, height: 6, background: '#ffffff', boxShadow: '0 0 8px #ffffff' }} /> LIVE
               </span>
             )}
             {tournament.status === 'completed' && (
-              <span className="badge badge-completed">Completed</span>
+              <span className="badge" style={{ fontSize: 12, background: 'rgba(255,255,255,0.2)', color: '#ffffff', border: '1px solid rgba(255,255,255,0.25)' }}>
+                Completed
+              </span>
             )}
           </div>
 
-          <p style={{ fontSize: 16, opacity: 0.85, maxWidth: 600, marginBottom: 20 }}>{tournament.description}</p>
+          <p style={{ fontSize: 16, color: 'rgba(255, 255, 255, 0.95)', maxWidth: 600, marginBottom: 20 }}>{tournament.description}</p>
 
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, fontSize: 14, opacity: 0.8 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, fontSize: 14, color: 'rgba(255, 255, 255, 0.85)' }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <IconCalendar size={16} />
               {new Date(tournament.start_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })} — {new Date(tournament.end_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}
@@ -434,8 +447,10 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                 padding: '4px 12px',
                 borderRadius: 'var(--radius-full)',
                 background: 'rgba(255,255,255,0.15)',
+                color: '#ffffff',
                 fontSize: 13,
                 fontWeight: 500,
+                border: '1px solid rgba(255,255,255,0.1)'
               }}>
                 {ev.event_name}
               </span>
@@ -824,7 +839,7 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {scheduledMatches.map(match => {
+                    {paginatedScheduleMatches.map(match => {
                       const eventObj = events.find(e => e.id === match.event_id);
                       const eventName = eventObj?.event_name || 'Event';
                       const matchNumber = getMatchNumber(match.id, match.event_id, liveScores);
@@ -880,6 +895,51 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                   })}
                   </tbody>
                 </table>
+              </div>
+            )}
+
+            {/* Pagination Controls for Schedule */}
+            {totalScheduleItems > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 16, flexWrap: 'wrap', gap: 12 }}>
+                <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                  Showing {(schedulePage - 1) * schedulePageSize + 1} to {Math.min(schedulePage * schedulePageSize, totalScheduleItems)} of {totalScheduleItems} entries
+                </span>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    onClick={() => setSchedulePage(prev => Math.max(prev - 1, 1))}
+                    disabled={schedulePage === 1}
+                    className="btn btn-secondary"
+                    style={{ padding: '6px 12px', fontSize: 13 }}
+                  >
+                    Previous
+                  </button>
+                  {Array.from({ length: totalSchedulePages }, (_, i) => i + 1)
+                    .filter(page => page === 1 || page === totalSchedulePages || Math.abs(page - schedulePage) <= 1)
+                    .map((page, idx, arr) => {
+                      const showEllipsisBefore = idx > 0 && page - arr[idx - 1] > 1;
+                      return (
+                        <React.Fragment key={page}>
+                          {showEllipsisBefore && <span style={{ padding: '6px 8px', color: 'var(--text-muted)' }}>...</span>}
+                          <button
+                            onClick={() => setSchedulePage(page)}
+                            className={`btn ${schedulePage === page ? 'btn-primary' : 'btn-secondary'}`}
+                            style={{ padding: '6px 12px', fontSize: 13, minWidth: 36 }}
+                          >
+                            {page}
+                          </button>
+                        </React.Fragment>
+                      );
+                    })
+                  }
+                  <button
+                    onClick={() => setSchedulePage(prev => Math.min(prev + 1, totalSchedulePages))}
+                    disabled={schedulePage === totalSchedulePages}
+                    className="btn btn-secondary"
+                    style={{ padding: '6px 12px', fontSize: 13 }}
+                  >
+                    Next
+                  </button>
+                </div>
               </div>
             )}
           </div>
