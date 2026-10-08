@@ -193,10 +193,11 @@ export default function BroadcastStudioPage() {
   const selectedTournament = selectedMatch ? tournaments.find(t => t.id === selectedMatch.tournament_id) : null;
   const selectedEvent = selectedMatch ? events.find(e => e.id === selectedMatch.event_id) : null;
 
-  const currentSet = selectedMatch?.sets[selectedMatch.sets.length - 1];
-  const p1Sets = selectedMatch?.sets.filter(s => s.is_complete && s.winner_id === selectedMatch.player1_id).length ?? 0;
-  const p2Sets = selectedMatch?.sets.filter(s => s.is_complete && s.winner_id === selectedMatch.player2_id).length ?? 0;
-  const completedSets = selectedMatch?.sets.filter(s => s.is_complete) ?? [];
+  // Active set computation: first incomplete set, or last set if all are complete
+  const currentSet = selectedMatch?.sets?.find(s => !s.is_complete) || selectedMatch?.sets?.[selectedMatch.sets.length - 1];
+  const p1Sets = selectedMatch?.sets?.filter(s => s.is_complete && (s.winner_id === selectedMatch.player1_id || s.winner_id === 'player1')).length ?? 0;
+  const p2Sets = selectedMatch?.sets?.filter(s => s.is_complete && (s.winner_id === selectedMatch.player2_id || s.winner_id === 'player2')).length ?? 0;
+  const completedSets = selectedMatch?.sets?.filter(s => s.is_complete) ?? [];
 
   const tennisMeta = selectedMatch?.sport_metadata;
   const p1GamePoints = tennisMeta?.player1_game_points ?? 0;
@@ -1071,7 +1072,7 @@ export default function BroadcastStudioPage() {
 
                   {/* Right: Set info / Court */}
                   <div style={{ display: 'flex', gap: 12, alignItems: 'center', fontSize: 11, color: 'rgba(255,255,255,0.5)' }}>
-                    <span>Set {selectedMatch.sets.length}</span>
+                    <span>Set {currentSet?.set_number || selectedMatch.sets?.length || 1}</span>
                     {selectedMatch.court && <span>📍 {selectedMatch.court}</span>}
                     {completedSets.length > 0 && (
                       <span style={{ color: 'rgba(255,255,255,0.3)', marginLeft: 8 }}>
@@ -1165,7 +1166,7 @@ export default function BroadcastStudioPage() {
                   <div style={{ display: 'flex', gap: 12, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                     <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', display: 'flex', alignItems: 'center', gap: 4 }}>
                       <span style={{ width: 4, height: 4, borderRadius: '50%', background: '#f43f5e', display: 'inline-block', animation: 'pulse-live 1.5s infinite' }} />
-                      Set {selectedMatch.sets.length}
+                      Set {currentSet?.set_number || selectedMatch.sets?.length || 1}
                     </div>
                     {selectedMatch.court && (
                       <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)' }}>

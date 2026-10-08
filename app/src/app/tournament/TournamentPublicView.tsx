@@ -590,12 +590,12 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                   gap: 24
                 }}>
                   {liveMatches.map(match => {
-                    const currentSet = match.sets[match.sets.length - 1];
+                    const currentSet = match.sets?.find(s => !s.is_complete) || match.sets?.[match.sets.length - 1];
                     const eventObj = events.find(e => e.id === match.event_id);
                     const eventName = eventObj?.event_name || 'Event';
                     
-                    const p1SetsWon = match.sets.filter(s => s.is_complete && s.winner_id === match.player1_id).length;
-                    const p2SetsWon = match.sets.filter(s => s.is_complete && s.winner_id === match.player2_id).length;
+                    const p1SetsWon = match.sets?.filter(s => s.is_complete && (s.winner_id === match.player1_id || s.winner_id === 'player1')).length ?? 0;
+                    const p2SetsWon = match.sets?.filter(s => s.is_complete && (s.winner_id === match.player2_id || s.winner_id === 'player2')).length ?? 0;
                     const matchNumber = getMatchNumber(match.id, match.event_id, liveScores);
 
                     const isTeamMatch = match.sub_matches && match.sub_matches.length > 0;
@@ -637,7 +637,7 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                             </span>
                           </div>
                           <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                            {match.court} {isTeamMatch ? '' : `· Set ${match.sets.length}`}
+                            {match.court} {isTeamMatch ? '' : `· Set ${currentSet?.set_number || match.sets?.length || 1}`}
                           </span>
                         </div>
 

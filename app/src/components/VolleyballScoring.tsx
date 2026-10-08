@@ -964,24 +964,6 @@ export default function VolleyballScoring({
                 >
                   {isServer ? '🏐' : item.posNum}
                 </div>
-                <span
-                  style={{
-                    fontSize: 8,
-                    fontWeight: 700,
-                    color: '#FFFFFF',
-                    background: 'rgba(15, 23, 42, 0.75)',
-                    padding: '1px 4px',
-                    borderRadius: 4,
-                    marginTop: 2,
-                    maxWidth: 48,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    textShadow: '0 1px 2px rgba(0,0,0,0.8)',
-                  }}
-                >
-                  {playerName}
-                </span>
               </div>
             );
           })}
@@ -1047,24 +1029,6 @@ export default function VolleyballScoring({
                 >
                   {isServer ? '🏐' : item.posNum}
                 </div>
-                <span
-                  style={{
-                    fontSize: 8,
-                    fontWeight: 700,
-                    color: '#FFFFFF',
-                    background: 'rgba(15, 23, 42, 0.75)',
-                    padding: '1px 4px',
-                    borderRadius: 4,
-                    marginTop: 2,
-                    maxWidth: 48,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    textShadow: '0 1px 2px rgba(0,0,0,0.8)',
-                  }}
-                >
-                  {playerName}
-                </span>
               </div>
             );
           })}
