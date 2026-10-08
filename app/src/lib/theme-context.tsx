@@ -12,7 +12,7 @@ interface ThemeContextType {
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>('dark');
+  const [theme, setTheme] = useState<Theme>('light');
 
   // Load from localStorage on mount
   useEffect(() => {
@@ -20,6 +20,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (saved === 'light' || saved === 'dark') {
       setTheme(saved);
       document.documentElement.setAttribute('data-theme', saved);
+    } else {
+      document.documentElement.setAttribute('data-theme', 'light');
     }
   }, []);
 

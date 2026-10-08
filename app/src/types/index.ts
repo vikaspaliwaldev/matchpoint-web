@@ -4,7 +4,7 @@
 
 // ---- Auth & Users ----
 
-export type UserRole = 'admin' | 'player' | 'umpire';
+export type UserRole = 'admin' | 'player' | 'umpire' | 'broadcaster' | 'system_admin';
 
 export interface User {
   id: string;
@@ -14,6 +14,9 @@ export interface User {
   roles: UserRole[]; // all assigned roles
   phone?: string;
   avatar?: string;
+  age?: number;
+  gender?: string;
+  date_of_birth?: string;
   created_at: string;
 }
 
@@ -24,9 +27,14 @@ export type TournamentStatus = 'draft' | 'open' | 'live' | 'completed' | 'cancel
 export interface MasterEvent {
   id: string;
   name: string;
-  category: string;
-  scoring_format: ScoringFormat;
-  format: EventFormat;
+  event_type: 'singles' | 'doubles' | 'team';
+  category: 'junior' | 'open' | 'veteran' | string;
+  gender: 'Male' | 'Female' | 'Mixed' | 'Open' | 'Boys' | 'Girls';
+  min_age: number;
+  max_age: number;
+  sport?: string;
+  sports?: string[];
+  created_at?: string;
 }
 
 export interface Tournament {
@@ -48,23 +56,58 @@ export interface Tournament {
   team_tie_configs?: { event_id: string; name: string; count: number }[];
   bonus_point_margin?: number;
   bonus_point_value?: number;
+  age_cutoff_date?: string;
+  withdraw_date?: string;
+  admins?: string[];
+  collects_fees?: boolean;
+  entry_fee?: number;
+  currency?: string;
+  platform_fee_percentage?: number;
+  payment_options?: PaymentOption[];
+  sport?: string;
+}
+
+export interface PaymentOption {
+  provider: 'razorpay' | 'mock';
+  enabled: boolean;
+  details?: Record<string, string>;
 }
 
 // ---- Event ----
 
 export type EventCategory = string;
 export type EventFormat = 'knockout' | 'round_robin' | 'swiss' | 'league' | 'hybrid';
-export type ScoringFormat = '11-point' | '15-point' | '21-point';
+export type ScoringFormat =
+  | '21-point'
+  | '15-point'
+  | '11-point'
+  | '25-point'
+  | '25-point-best-of-3'
+  | '25-point-best-of-5'
+  | '15-point-best-of-3'
+  | 'standard'
+  | string;
 
 export interface TournamentEvent {
   id: string;
   tournament_id: string;
-  event_name: string;
-  category: EventCategory;
+  master_event_id: string;
+  event_name?: string;
+  category?: EventCategory;
   entry_limit: number;
   format: EventFormat;
   registrations_count?: number;
   scoring_format?: ScoringFormat;
+  entry_fee?: number;
+  gender_restriction?: string;
+  age_limit?: number;
+  age_restriction_type?: string;
+  event_type?: 'SINGLES' | 'DOUBLES' | 'MIXED_DOUBLES' | 'TEAM';
+  gender?: 'BOYS' | 'GIRLS' | 'MALE' | 'FEMALE' | 'MIXED' | 'OPEN';
+  age_category?: string;
+  min_age?: number;
+  max_age?: number;
+  sport?: string;
 }
 
 // ---- Registration ----
@@ -82,6 +125,14 @@ export interface Registration {
   registered_at: string;
   seed?: number;
   disqualification_reason?: string;
+  partner_name?: string;
+  partner_email?: string;
+  partner_gender?: string;
+  partner_age?: number;
+  payment_status?: string;
+  payment_method?: string;
+  payment_reference?: string;
+  notes?: string;
 }
 
 // ---- Team ----
@@ -91,6 +142,7 @@ export interface Team {
   name: string;
   tournament_id: string;
   logo_color: string; // hex color for team identity
+  logo_url?: string;
   captain_id?: string;
   players: string[]; // player user IDs
 }
@@ -107,14 +159,16 @@ export interface TeamSubMatch {
   sets: MatchSet[];
   status: MatchStatus;
   winner_id?: string;
+  t1_trump?: boolean;
+  t2_trump?: boolean;
 }
 
 export interface Match {
   id: string;
-  tournament_id: string;
-  event_id: string;
-  fixture_round: number;
-  fixture_position: number;
+  tournament_id?: string;
+  event_id?: string;
+  fixture_round?: number;
+  fixture_position?: number;
   court?: string;
   player1_id: string;
   player1_name: string;
@@ -130,6 +184,13 @@ export interface Match {
   winner_id?: string;
   sets: MatchSet[];
   sub_matches?: TeamSubMatch[];
+  round_name?: string;
+  is_adhoc?: boolean;
+  adhoc_type?: string;
+  max_viewers?: number;
+  sport?: string;
+  sport_metadata?: any;
+  match_code?: string;
 }
 
 export interface MatchSet {
@@ -177,4 +238,33 @@ export interface DashboardStats {
   totalMatches: number;
   liveMatches: number;
   completedMatches: number;
+}
+
+export interface TournamentMedia {
+  id: string;
+  tournament_id?: string;
+  match_id?: string;
+  uploaded_by?: string;
+  file_url: string;
+  caption?: string;
+  media_type: 'image' | 'video' | 'document';
+  created_at?: string;
+}
+
+export interface MatchComment {
+  id: string;
+  match_id: string;
+  user_id?: string;
+  user_name: string;
+  message: string;
+  created_at?: string;
+}
+
+export interface MatchPoll {
+  id: string;
+  match_id: string;
+  question: string;
+  options: string[];
+  votes: number[];
+  created_at?: string;
 }

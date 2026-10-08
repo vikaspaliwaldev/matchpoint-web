@@ -2,32 +2,43 @@
 
 import React, { useState, useEffect } from 'react';
 import { User, Match, Tournament, Registration, TournamentEvent } from '@/types';
-import { getPlayers, getMatches, getTournaments, getPlayerRegistrations, getEvents } from '@/lib/supabase-service';
-import { IconUsers, IconTrophy, IconActivity, IconCalendar, IconClock, IconMapPin } from '@/components/icons';
+import { getPlayers, getMatches, getTournaments, getPlayerRegistrations, getEvents, getAllTeams } from '@/lib/supabase-service';
+import { IconUsers, IconTrophy, IconActivity, IconCalendar, IconClock, IconMapPin, IconX } from '@/components/icons';
+import { useAuth } from '@/lib/auth-context';
+import { useSport } from '@/lib/sport-context';
+import { Team } from '@/types';
 
 export default function PlayersDirectoryPage() {
+  const { activeRole } = useAuth();
+  const { activeSport } = useSport();
   const [players, setPlayers] = useState<User[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [events, setEvents] = useState<TournamentEvent[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [directorySportFilter, setDirectorySportFilter] = useState<string>('all');
+  const [profileSportFilter, setProfileSportFilter] = useState<string>('all');
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
+  const [viewingPlayer, setViewingPlayer] = useState<User | null>(null);
 
   useEffect(() => {
     async function loadData() {
       try {
         setLoading(true);
-        const [playersData, matchesData, toursData, evsData] = await Promise.all([
+        const [playersData, matchesData, toursData, evsData, teamsData] = await Promise.all([
           getPlayers(),
           getMatches(),
           getTournaments(),
-          getEvents()
+          getEvents(),
+          getAllTeams(),
         ]);
         setPlayers(playersData);
         setMatches(matchesData);
         setTournaments(toursData);
         setEvents(evsData);
+        setTeams(teamsData);
         if (playersData.length > 0) {
           setSelectedPlayerId(playersData[0].id);
         }
@@ -40,17 +51,70 @@ export default function PlayersDirectoryPage() {
     loadData();
   }, []);
 
-  const filteredPlayers = players.filter(p =>
-    p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    p.email.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const targetSport = directorySportFilter !== 'all' ? directorySportFilter : activeSport;
+
+  const filteredPlayers = players.filter(p => {
+    const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      p.email.toLowerCase().includes(searchQuery.toLowerCase());
+    if (!matchesSearch) return false;
+
+    if (targetSport === 'all') return true;
+
+    // 1. Check if the player has any match in the target sport
+    const hasMatchInSport = matches.some(m => {
+      const isPlayer = m.player1_id === p.id || m.player2_id === p.id;
+      if (!isPlayer) return false;
+      const tour = tournaments.find(tour => tour.id === m.tournament_id);
+      return m.sport === targetSport || (tour && tour.sport === targetSport);
+    });
+    if (hasMatchInSport) return true;
+
+    // 2. Check if the player belongs to a team registered in a targetSport tournament
+    const belongsToTeamInSport = teams.some(t => {
+      if (!t.players.includes(p.id) && !t.players.includes(p.name)) return false;
+      const tour = tournaments.find(tour => tour.id === t.tournament_id);
+      return tour && (tour.sport === targetSport || (targetSport === 'volleyball' && tour.id.includes('vpl')));
+    });
+    if (belongsToTeamInSport) return true;
+
+    // 3. Fallback
+    return targetSport === 'badminton';
+  });
+
+  // Auto-select first matching player when active sport or list changes
+  useEffect(() => {
+    if (filteredPlayers.length > 0) {
+      if (!filteredPlayers.some(p => p.id === selectedPlayerId)) {
+        setSelectedPlayerId(filteredPlayers[0].id);
+      }
+    } else {
+      setSelectedPlayerId(null);
+    }
+  }, [activeSport, directorySportFilter, filteredPlayers, selectedPlayerId]);
 
   const selectedPlayer = players.find(p => p.id === selectedPlayerId);
 
-  // Calculate statistics for selected player
-  const playerMatches = matches.filter(m =>
-    m.player1_id === selectedPlayerId || m.player2_id === selectedPlayerId
-  );
+  // Calculate statistics for selected player split/filtered by sport
+  const playerMatches = matches.filter(m => {
+    const isPlayer = m.player1_id === selectedPlayerId || m.player2_id === selectedPlayerId;
+    if (!isPlayer) return false;
+    const tour = tournaments.find(t => t.id === m.tournament_id);
+    const mSport = m.sport || tour?.sport || 'badminton';
+    if (profileSportFilter !== 'all') {
+      return mSport === profileSportFilter;
+    }
+    return activeSport === 'all' || (tour && tour.sport === activeSport) || m.sport === activeSport;
+  });
+
+  // Calculate all sports played by selected player
+  const playerSportsPlayed = Array.from(new Set(
+    matches
+      .filter(m => m.player1_id === selectedPlayerId || m.player2_id === selectedPlayerId)
+      .map(m => {
+        const tour = tournaments.find(t => t.id === m.tournament_id);
+        return m.sport || tour?.sport || 'badminton';
+      })
+  ));
 
   // Matches in descending order (recent first)
   const sortedMatches = [...playerMatches].sort((a, b) => {
@@ -100,6 +164,40 @@ export default function PlayersDirectoryPage() {
             onChange={e => setSearchQuery(e.target.value)}
           />
 
+          {/* Sport Filter Tabs */}
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {[
+              { id: 'all', label: 'All', icon: '🌍' },
+              { id: 'volleyball', label: 'Volleyball', icon: '🏐' },
+              { id: 'badminton', label: 'Badminton', icon: '🏸' },
+              { id: 'table_tennis', label: 'Table Tennis', icon: '🏓' },
+              { id: 'squash', label: 'Squash', icon: '🎾' },
+            ].map(s => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => setDirectorySportFilter(s.id)}
+                style={{
+                  padding: '4px 10px',
+                  borderRadius: '20px',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  border: '1px solid',
+                  borderColor: (directorySportFilter === s.id || (directorySportFilter === 'all' && s.id === 'all')) ? 'var(--accent)' : 'var(--border)',
+                  background: (directorySportFilter === s.id || (directorySportFilter === 'all' && s.id === 'all')) ? 'var(--accent-subtle)' : 'var(--bg-secondary)',
+                  color: (directorySportFilter === s.id || (directorySportFilter === 'all' && s.id === 'all')) ? 'var(--accent)' : 'var(--text-secondary)',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                }}
+              >
+                <span>{s.icon}</span>
+                <span>{s.label}</span>
+              </button>
+            ))}
+          </div>
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {filteredPlayers.map(player => (
               <button
@@ -119,14 +217,18 @@ export default function PlayersDirectoryPage() {
                   transition: 'all var(--transition-fast)'
                 }}
               >
-                <div style={{
-                  width: 36, height: 36, borderRadius: '50%',
-                  background: 'linear-gradient(135deg, var(--accent), #8b5cf6)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 14, fontWeight: 700, color: '#fff', flexShrink: 0
-                }}>
-                  {player.name.charAt(0)}
-                </div>
+                {player.avatar ? (
+                  <img src={player.avatar} alt={player.name} style={{ width: 36, height: 36, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }} />
+                ) : (
+                  <div style={{
+                    width: 36, height: 36, borderRadius: '50%',
+                    background: 'linear-gradient(135deg, var(--accent), #3b82f6)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 14, fontWeight: 700, color: '#fff', flexShrink: 0
+                  }}>
+                    {player.name.charAt(0).toUpperCase()}
+                  </div>
+                )}
                 <div style={{ overflow: 'hidden' }}>
                   <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {player.name}
@@ -151,17 +253,45 @@ export default function PlayersDirectoryPage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
             {/* Header / Stats row */}
             <div className="glass-card" style={{ padding: 24, display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
-              <div style={{
-                width: 64, height: 64, borderRadius: '50%',
-                background: 'linear-gradient(135deg, var(--accent), #8b5cf6)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 24, fontWeight: 700, color: '#fff'
-              }}>
-                {selectedPlayer.name.charAt(0)}
-              </div>
+              {selectedPlayer.avatar ? (
+                <img src={selectedPlayer.avatar} alt={selectedPlayer.name} style={{ width: 64, height: 64, borderRadius: '50%', objectFit: 'cover' }} />
+              ) : (
+                <div style={{
+                  width: 64, height: 64, borderRadius: '50%',
+                  background: 'linear-gradient(135deg, var(--accent), #3b82f6)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 24, fontWeight: 700, color: '#fff'
+                }}>
+                  {selectedPlayer.name.charAt(0).toUpperCase()}
+                </div>
+              )}
               <div style={{ flex: 1 }}>
-                <h2 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)' }}>{selectedPlayer.name}</h2>
-                <p style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{selectedPlayer.email}</p>
+                {activeRole === 'admin' ? (
+                  <h2 style={{ fontSize: 22, fontWeight: 700, margin: 0, padding: 0 }}>
+                    <button
+                      type="button"
+                      onClick={() => setViewingPlayer(selectedPlayer)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        padding: 0,
+                        margin: 0,
+                        fontWeight: 700,
+                        color: 'var(--accent)',
+                        textDecoration: 'underline',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        fontFamily: 'inherit',
+                        fontSize: 'inherit'
+                      }}
+                    >
+                      {selectedPlayer.name}
+                    </button>
+                  </h2>
+                ) : (
+                  <h2 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)' }}>{selectedPlayer.name}</h2>
+                )}
+                <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 4 }}>{selectedPlayer.email}</p>
                 <div style={{ display: 'inline-flex', gap: 4, marginTop: 6 }}>
                   {selectedPlayer.roles.map(r => (
                     <span key={r} className="badge badge-accent" style={{ textTransform: 'capitalize', fontSize: 10 }}>{r}</span>
@@ -169,8 +299,45 @@ export default function PlayersDirectoryPage() {
                 </div>
               </div>
 
+              {/* Sport Split Selector for Player Stats */}
+              <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                  Filter Stats By Sport:
+                </span>
+                <div style={{ display: 'inline-flex', gap: 6, flexWrap: 'wrap' }}>
+                  {['all', ...playerSportsPlayed].map(s => {
+                    const label = s === 'all' ? 'All Disciplines' : s.replace('_', ' ').toUpperCase();
+                    const icon = s === 'volleyball' ? '🏐' : s === 'badminton' ? '🏸' : s === 'table_tennis' ? '🏓' : s === 'squash' ? '🎾' : '🏅';
+                    return (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setProfileSportFilter(s)}
+                        style={{
+                          padding: '3px 10px',
+                          borderRadius: '16px',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          border: '1px solid',
+                          borderColor: profileSportFilter === s ? 'var(--accent)' : 'var(--border)',
+                          background: profileSportFilter === s ? 'var(--accent-subtle)' : 'var(--bg-secondary)',
+                          color: profileSportFilter === s ? 'var(--accent)' : 'var(--text-secondary)',
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 4,
+                        }}
+                      >
+                        <span>{icon}</span>
+                        <span>{label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               {/* Stats Block */}
-              <div style={{ display: 'flex', gap: 16 }}>
+              <div style={{ display: 'flex', gap: 16, width: '100%', flexWrap: 'wrap' }}>
                 <div className="stat-card" style={{ minWidth: 100, padding: '12px 16px' }}>
                   <div className="stat-value" style={{ fontSize: 20, color: 'var(--text-primary)' }}>{playerMatches.length}</div>
                   <div className="stat-label" style={{ fontSize: 10 }}>Matches</div>
@@ -296,6 +463,72 @@ export default function PlayersDirectoryPage() {
             <p>Select a player to view their profile, stats, and match timeline.</p>
           </div>
         )}
+      </div>
+
+      {viewingPlayer && (
+        <PlayerProfileModal player={viewingPlayer} onClose={() => setViewingPlayer(null)} />
+      )}
+    </div>
+  );
+}
+
+function PlayerProfileModal({
+  player,
+  onClose
+}: {
+  player: User;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: 420, padding: 24, borderRadius: 'var(--radius-lg)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 700 }}>Player Profile</h2>
+          <button className="btn btn-ghost btn-icon" onClick={onClose}><IconX size={18} /></button>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, textAlign: 'center', marginBottom: 24 }}>
+          {player.avatar ? (
+            <img src={player.avatar} alt={player.name} style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover' }} />
+          ) : (
+            <div style={{
+              width: 80, height: 80, borderRadius: '50%',
+              background: 'linear-gradient(135deg, var(--accent), #3b82f6)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 28, fontWeight: 700, color: '#fff',
+              boxShadow: '0 10px 25px -5px rgba(37, 99, 235, 0.4)'
+            }}>
+              {player.name.charAt(0).toUpperCase()}
+            </div>
+          )}
+          <div>
+            <h3 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>{player.name}</h3>
+            <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
+              {player.roles.map(r => (
+                <span key={r} className="badge badge-accent" style={{ textTransform: 'capitalize', fontSize: 10 }}>{r}</span>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14, background: 'var(--bg-secondary)', padding: 18, borderRadius: 'var(--radius-md)', border: '1px solid var(--border)', marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border)', paddingBottom: 10 }}>
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Email Address</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{player.email}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border)', paddingBottom: 10 }}>
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Phone Number</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{player.phone || 'Not provided'}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border)', paddingBottom: 10 }}>
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Age</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{player.age !== undefined && player.age !== null ? `${player.age} years` : 'Not provided'}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', paddingBottom: 4 }}>
+            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Gender</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{player.gender || 'Not provided'}</span>
+          </div>
+        </div>
       </div>
     </div>
   );

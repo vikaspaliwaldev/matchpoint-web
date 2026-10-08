@@ -1,18 +1,60 @@
 'use client';
 
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '@/lib/auth-context';
-import { mockMatches } from '@/lib/mock-data';
+import { useSport } from '@/lib/sport-context';
+import { getMatches, getTournaments, getEvents } from '@/lib/supabase-service';
+import { Match, Tournament, TournamentEvent } from '@/types';
 import { IconClock, IconTrophy } from '@/components/icons';
 
 export default function MyMatchesPage() {
   const { user } = useAuth();
+  const { activeSport } = useSport();
+  const [matches, setMatches] = useState<Match[]>([]);
+  const [tournaments, setTournaments] = useState<Tournament[]>([]);
+  const [events, setEvents] = useState<TournamentEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!user) return;
+    async function loadMatchesData() {
+      try {
+        setLoading(true);
+        const [mats, tours, evs] = await Promise.all([
+          getMatches(),
+          getTournaments(),
+          getEvents(),
+        ]);
+        setMatches(mats);
+        setTournaments(tours);
+        setEvents(evs);
+      } catch (err) {
+        console.error('Failed to load my matches:', err);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadMatchesData();
+  }, [user]);
 
   if (!user) return null;
 
-  const myMatches = mockMatches.filter(
-    m => m.player1_id === user.id || m.player2_id === user.id
-  );
+  if (loading) {
+    return (
+      <div className="glass-card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-secondary)' }}>
+        <div className="animate-spin" style={{ display: 'inline-block', fontSize: 24, marginBottom: 12, animation: 'spin 2s linear infinite' }}>🔄</div>
+        <p style={{ fontSize: 15, fontWeight: 500 }}>Loading your matches...</p>
+      </div>
+    );
+  }
+
+  const myMatches = matches.filter(m => {
+    const matchesSport = activeSport === 'all' || m.sport === activeSport;
+    if (!matchesSport) return false;
+    const isP1 = m.player1_id === user.id || (m.player1_id && m.player1_id.split('/').includes(user.id)) || (user.name && m.player1_name.toLowerCase().includes(user.name.toLowerCase()));
+    const isP2 = m.player2_id === user.id || (m.player2_id && m.player2_id.split('/').includes(user.id)) || (user.name && m.player2_name.toLowerCase().includes(user.name.toLowerCase()));
+    return isP1 || isP2;
+  });
 
   const liveMatches = myMatches.filter(m => m.status === 'running');
   const upcomingMatches = myMatches.filter(m => m.status === 'scheduled');
@@ -30,7 +72,13 @@ export default function MyMatchesPage() {
           </h2>
           <div style={{ display: 'grid', gap: 12 }}>
             {liveMatches.map(match => (
-              <MatchCard key={match.id} match={match} userId={user.id} />
+              <MatchCard
+                key={match.id}
+                match={match}
+                userId={user.id}
+                tournaments={tournaments}
+                events={events}
+              />
             ))}
           </div>
         </div>
@@ -43,7 +91,13 @@ export default function MyMatchesPage() {
         ) : (
           <div style={{ display: 'grid', gap: 12 }}>
             {upcomingMatches.map(match => (
-              <MatchCard key={match.id} match={match} userId={user.id} />
+              <MatchCard
+                key={match.id}
+                match={match}
+                userId={user.id}
+                tournaments={tournaments}
+                events={events}
+              />
             ))}
           </div>
         )}
@@ -56,7 +110,13 @@ export default function MyMatchesPage() {
         ) : (
           <div style={{ display: 'grid', gap: 12 }}>
             {completedMatches.map(match => (
-              <MatchCard key={match.id} match={match} userId={user.id} />
+              <MatchCard
+                key={match.id}
+                match={match}
+                userId={user.id}
+                tournaments={tournaments}
+                events={events}
+              />
             ))}
           </div>
         )}
@@ -65,11 +125,25 @@ export default function MyMatchesPage() {
   );
 }
 
-function MatchCard({ match, userId }: { match: typeof mockMatches[0]; userId: string }) {
+function MatchCard({
+  match,
+  userId,
+  tournaments,
+  events,
+}: {
+  match: Match;
+  userId: string;
+  tournaments: Tournament[];
+  events: TournamentEvent[];
+}) {
   const isWinner = match.winner_id === userId;
   const isLoser = match.status === 'completed' && match.winner_id !== userId;
   const isLive = match.status === 'running';
-  const currentSet = match.sets[match.sets.length - 1];
+
+  const tournament = tournaments.find(t => t.id === match.tournament_id);
+  const eventObj = events.find(e => e.id === match.event_id);
+  const tourName = tournament?.name || 'Tournament';
+  const eventName = eventObj?.event_name || 'Event';
 
   return (
     <div className="glass-card" style={{
@@ -84,6 +158,12 @@ function MatchCard({ match, userId }: { match: typeof mockMatches[0]; userId: st
           {match.status === 'scheduled' && <span className="badge badge-open">Scheduled</span>}
         </div>
         <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{match.court}</span>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--accent)', textTransform: 'uppercase' }}>
+          {tourName} · {eventName}
+        </span>
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

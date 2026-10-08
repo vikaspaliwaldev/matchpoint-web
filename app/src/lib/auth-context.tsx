@@ -3,34 +3,187 @@
 import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
 import { User, UserRole } from '@/types';
 import { mockUsers } from '@/lib/mock-data';
+import { isSupabaseConfigured } from './supabase';
+
+import { API_BASE_URL } from './api-config';
 
 interface AuthContextType {
   user: User | null;
   activeRole: UserRole | null;
   isLoading: boolean;
   needsRoleSelection: boolean;
+  isProfileComplete: boolean;
   login: (email: string, password: string) => Promise<boolean>;
-  register: (name: string, email: string, password: string, role: UserRole) => Promise<boolean>;
+  register: (name: string, email: string, password: string) => Promise<boolean>;
   logout: () => void;
   selectRole: (role: UserRole) => void;
   switchRole: (role: UserRole) => void;
+  refreshProfile: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+function parseJwt(token: string) {
+  try {
+    const base64Url = token.split('.')[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    const jsonPayload = decodeURIComponent(
+      window.atob(base64)
+        .split('')
+        .map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+        .join('')
+    );
+    return JSON.parse(jsonPayload);
+  } catch (e) {
+    return null;
+  }
+}
+
+function mapProfileToUser(data: any): User {
+  const roles: UserRole[] = (data.roles || ['player']) as UserRole[];
+  let primaryRole: UserRole = 'player';
+  if (roles.includes('system_admin')) primaryRole = 'system_admin';
+  else if (roles.includes('admin')) primaryRole = 'admin';
+  else if (roles.includes('umpire')) primaryRole = 'umpire';
+  else if (roles.includes('broadcaster')) primaryRole = 'broadcaster';
+  return {
+    id: data.id,
+    email: data.email,
+    name: data.name,
+    phone: data.phone,
+    age: data.age,
+    gender: data.gender,
+    avatar: data.avatar,
+    date_of_birth: data.dateOfBirth || data.date_of_birth || undefined,
+    role: primaryRole,
+    roles,
+    created_at: data.createdAt || data.created_at || new Date().toISOString()
+  };
+}
+
+function checkProfileComplete(u: User | null): boolean {
+  if (!u) return false;
+  // System administrators and admins are not blocked by player profile completeness
+  if (u.roles?.includes('system_admin') || u.role === 'system_admin') return true;
+  return !!(u.date_of_birth && u.phone && u.gender);
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [activeRole, setActiveRole] = useState<UserRole | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return !!localStorage.getItem('matchpoint_token');
+    }
+    return false;
+  });
   const [needsRoleSelection, setNeedsRoleSelection] = useState(false);
+
+  const isProfileComplete = checkProfileComplete(user);
+
+  const handleUserRoles = (mappedUser: User) => {
+    setUser(mappedUser);
+    const storedRole = typeof window !== 'undefined' ? localStorage.getItem('matchpoint_active_role') as UserRole : null;
+    if (storedRole && mappedUser.roles.includes(storedRole)) {
+      setActiveRole(storedRole);
+      setNeedsRoleSelection(false);
+    } else if (mappedUser.roles.length === 1) {
+      setActiveRole(mappedUser.roles[0]);
+      setNeedsRoleSelection(false);
+    } else {
+      setNeedsRoleSelection(true);
+      setActiveRole(null);
+    }
+  };
+
+  // Refresh profile from server (used after profile save)
+  const refreshProfile = useCallback(async () => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('matchpoint_token') : null;
+    if (!token || !user) return;
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/profiles/${user.id}?t=${Date.now()}`, {
+        headers: { 
+          'Authorization': `Bearer ${token}`,
+          'bypass-tunnel-reminder': 'true',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const mappedUser = mapProfileToUser(data);
+        setUser(mappedUser);
+      }
+    } catch (err) {
+      console.error('Failed to refresh profile:', err);
+    }
+  }, [user]);
+
+  // Keep-alive scheduler for Render backend service (pings /ping every 10 min)
+  React.useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    const pingBackend = async () => {
+      try {
+        await fetch(`${API_BASE_URL}/api/v1/ping`, {
+          headers: { 'bypass-tunnel-reminder': 'true' }
+        });
+      } catch (e) {
+        // Fail silently
+      }
+    };
+    pingBackend();
+    const interval = setInterval(pingBackend, 10 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  React.useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('matchpoint_token') : null;
+    if (token) {
+      const decoded = parseJwt(token);
+      if (decoded && decoded.userId) {
+        setIsLoading(true);
+        fetch(`${API_BASE_URL}/api/v1/profiles/${decoded.userId}`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'bypass-tunnel-reminder': 'true'
+          }
+        })
+          .then(res => {
+            if (res.ok) return res.json();
+            throw new Error('Failed to load profile');
+          })
+          .then(data => {
+            const mappedUser = mapProfileToUser(data);
+            handleUserRoles(mappedUser);
+          })
+          .catch(err => {
+            console.error('Session restoration failed:', err);
+            localStorage.removeItem('matchpoint_token');
+            setUser(null);
+            setActiveRole(null);
+          })
+          .finally(() => {
+            setIsLoading(false);
+          });
+      } else {
+        setIsLoading(false);
+      }
+    } else {
+      setIsLoading(false);
+    }
+  }, []);
 
   const login = useCallback(async (email: string, password: string): Promise<boolean> => {
     setIsLoading(true);
 
     try {
-      const res = await fetch('http://localhost:8080/api/v1/auth/login', {
+      const res = await fetch(`${API_BASE_URL}/api/v1/auth/login`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'bypass-tunnel-reminder': 'true'
+        },
         body: JSON.stringify({ email, password })
       });
 
@@ -38,28 +191,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const data = await res.json();
         localStorage.setItem('matchpoint_token', data.token);
 
-        const mappedUser: User = {
-          id: data.user.id,
-          email: data.user.email,
-          name: data.user.name,
-          role: data.user.roles[0],
-          roles: data.user.roles,
-          created_at: new Date().toISOString()
-        };
+        // Fetch full profile details to get age, gender, phone, date_of_birth, etc.
+        const profileRes = await fetch(`${API_BASE_URL}/api/v1/profiles/${data.user.id}`, {
+          headers: {
+            'Authorization': `Bearer ${data.token}`,
+            'bypass-tunnel-reminder': 'true'
+          }
+        });
 
-        setUser(mappedUser);
-        if (mappedUser.roles.length === 1) {
-          setActiveRole(mappedUser.roles[0]);
-          setNeedsRoleSelection(false);
-        } else {
-          setNeedsRoleSelection(true);
-          setActiveRole(null);
+        let fullProfile = data.user;
+        if (profileRes.ok) {
+          fullProfile = await profileRes.json();
         }
+
+        const mappedUser = mapProfileToUser(fullProfile);
+        handleUserRoles(mappedUser);
         setIsLoading(false);
         return true;
+      } else {
+        if (isSupabaseConfigured) {
+          setIsLoading(false);
+          return false;
+        }
       }
     } catch (err) {
-      console.warn('REST API login failed, falling back to mock:', err);
+      console.warn('REST API login failed:', err);
+      if (isSupabaseConfigured) {
+        setIsLoading(false);
+        return false;
+      }
     }
 
     // Mock Fallback
@@ -67,16 +227,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const found = mockUsers.find(u => u.email === email);
     if (found) {
-      setUser(found);
-      if (found.roles.length === 1) {
-        // Single role — auto-select
-        setActiveRole(found.roles[0]);
-        setNeedsRoleSelection(false);
-      } else {
-        // Multiple roles — show picker
-        setNeedsRoleSelection(true);
-        setActiveRole(null);
-      }
+      handleUserRoles(found);
       setIsLoading(false);
       return true;
     }
@@ -84,22 +235,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return false;
   }, []);
 
-  const register = useCallback(async (name: string, email: string, password: string, role: UserRole): Promise<boolean> => {
+  const register = useCallback(async (name: string, email: string, password: string): Promise<boolean> => {
     setIsLoading(true);
 
     try {
-      const res = await fetch('http://localhost:8080/api/v1/auth/register', {
+      const res = await fetch(`${API_BASE_URL}/api/v1/auth/register`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, email, password, roles: [role] })
+        headers: { 
+          'Content-Type': 'application/json',
+          'bypass-tunnel-reminder': 'true'
+        },
+        body: JSON.stringify({ name, email, password })
       });
 
       if (res.ok) {
         setIsLoading(false);
         return login(email, password);
+      } else {
+        if (isSupabaseConfigured) {
+          setIsLoading(false);
+          return false;
+        }
       }
     } catch (err) {
-      console.warn('REST API registration failed, falling back to mock:', err);
+      console.warn('REST API registration failed:', err);
+      if (isSupabaseConfigured) {
+        setIsLoading(false);
+        return false;
+      }
     }
 
     // Mock Fallback
@@ -109,13 +272,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       id: `u${Date.now()}`,
       email,
       name,
-      role,
-      roles: [role],
+      role: 'player',
+      roles: ['player'],
       created_at: new Date().toISOString(),
     };
     mockUsers.push(newUser);
     setUser(newUser);
-    setActiveRole(role);
+    setActiveRole('player');
     setNeedsRoleSelection(false);
     setIsLoading(false);
     return true;
@@ -123,6 +286,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     localStorage.removeItem('matchpoint_token');
+    localStorage.removeItem('matchpoint_active_role');
     setUser(null);
     setActiveRole(null);
     setNeedsRoleSelection(false);
@@ -131,6 +295,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const selectRole = useCallback((role: UserRole) => {
     if (user && user.roles.includes(role)) {
       setActiveRole(role);
+      localStorage.setItem('matchpoint_active_role', role);
       setNeedsRoleSelection(false);
     }
   }, [user]);
@@ -138,6 +303,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const switchRole = useCallback((role: UserRole) => {
     if (user && user.roles.includes(role)) {
       setActiveRole(role);
+      localStorage.setItem('matchpoint_active_role', role);
+      window.location.href = '/dashboard';
     }
   }, [user]);
 
@@ -147,11 +314,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       activeRole,
       isLoading,
       needsRoleSelection,
+      isProfileComplete,
       login,
       register,
       logout,
       selectRole,
       switchRole,
+      refreshProfile,
     }}>
       {children}
     </AuthContext.Provider>

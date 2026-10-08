@@ -8,12 +8,19 @@ import {
   getRegistrationsByEvent,
   saveMatchesBatch,
   getTeamsByTournament,
+  updateMatchPlayers,
+  deleteMatch,
+  createMatch,
+  updateRoundName,
 } from '@/lib/supabase-service';
-import { generateKnockoutBracket } from '@/lib/fixtures';
+import { generateKnockoutBracket, generateRoundRobinFixtures } from '@/lib/fixtures';
 import { Match, TournamentEvent, Tournament, Registration, Team } from '@/types';
-import { IconTrophy, IconZap, IconRefreshCw } from '@/components/icons';
+import { IconTrophy, IconZap, IconRefreshCw, IconX } from '@/components/icons';
+import PdfReportGenerator from '@/components/PdfReportGenerator';
+import { useSport } from '@/lib/sport-context';
 
 export default function FixturesPage() {
+  const { activeSport } = useSport();
   const [events, setEvents] = useState<TournamentEvent[]>([]);
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [matches, setMatches] = useState<Match[]>([]);
@@ -22,7 +29,141 @@ export default function FixturesPage() {
   const [generating, setGenerating] = useState(false);
   const [generatedBracket, setGeneratedBracket] = useState<{ rounds: { round_number: number; round_name: string; matches: Match[] }[] } | null>(null);
 
+  const [eventSearchQuery, setEventSearchQuery] = useState('');
+  const [showEventSuggestions, setShowEventSuggestions] = useState(false);
+
+  useEffect(() => {
+    if (selectedEvent && events.length > 0 && tournaments.length > 0) {
+      const activeEv = events.find(e => e.id === selectedEvent);
+      if (activeEv) {
+        const activeT = tournaments.find(t => t.id === activeEv.tournament_id);
+        setEventSearchQuery(`${activeT?.name || 'Tournament'} — ${activeEv.event_name}`);
+      }
+    }
+  }, [selectedEvent, events, tournaments]);
+
   const [approvedRegs, setApprovedRegs] = useState<Registration[]>([]);
+  
+  // Swap / Add Match Modal states
+  const [showSwapModal, setShowSwapModal] = useState(false);
+  const [selectedMatch, setSelectedMatch] = useState<Match | null>(null);
+  const [swapPlayer1, setSwapPlayer1] = useState('');
+  const [swapPlayer2, setSwapPlayer2] = useState('');
+
+  const [showAddMatchModal, setShowAddMatchModal] = useState(false);
+  const [addRound, setAddRound] = useState(1);
+  const [addPosition, setAddPosition] = useState(0);
+  const [addPlayer1, setAddPlayer1] = useState('tbd');
+  const [addPlayer2, setAddPlayer2] = useState('tbd');
+  const [addCourt, setAddCourt] = useState('Court 1');
+  const [addTime, setAddTime] = useState('');
+
+  // Bulk Upload Fixture CSV/JSON Modal states
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [uploadText, setUploadText] = useState('');
+  const [uploadError, setUploadError] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
+
+  const handleDownloadFixtureTemplate = () => {
+    const csv = "RoundName,Position,Player1_or_Team1,Player2_or_Team2,Court,ScheduledTime\nRound 1,1,Alpha Warriors,Thunderbolts,Court 1,2026-10-10T10:00\nRound 1,2,Smashers,Aces,Court 2,2026-10-10T11:00\nFinal,1,TBD,TBD,Center Court,2026-10-11T16:00\n";
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'matchpoint_fixture_schedule_template.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleProcessUpload = async () => {
+    if (!selectedEvent || !tournament) {
+      alert('Please select an event first.');
+      return;
+    }
+    if (!uploadText.trim()) {
+      setUploadError('Please provide CSV data or choose a file.');
+      return;
+    }
+
+    try {
+      setIsUploading(true);
+      setUploadError('');
+      const lines = uploadText.trim().split('\n').map(l => l.trim()).filter(Boolean);
+      if (lines.length < 2) {
+        throw new Error('CSV must contain a header row and at least one data row.');
+      }
+
+      // Check header
+      const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+      const roundIdx = header.findIndex(h => h.includes('round'));
+      const posIdx = header.findIndex(h => h.includes('pos'));
+      const p1Idx = header.findIndex(h => h.includes('player1') || h.includes('team1'));
+      const p2Idx = header.findIndex(h => h.includes('player2') || h.includes('team2'));
+      const courtIdx = header.findIndex(h => h.includes('court'));
+      const timeIdx = header.findIndex(h => h.includes('time') || h.includes('date'));
+
+      if (p1Idx === -1 || p2Idx === -1) {
+        throw new Error('Header must include columns for Player1_or_Team1 and Player2_or_Team2.');
+      }
+
+      const chosenSport = event?.sport || tournament?.sport || activeSport || 'badminton';
+      const parsedMatches: Match[] = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(',').map(p => p.trim());
+        if (parts.length < 2) continue;
+
+        const roundName = roundIdx !== -1 && parts[roundIdx] ? parts[roundIdx] : `Round 1`;
+        const pos = posIdx !== -1 && !isNaN(Number(parts[posIdx])) ? Number(parts[posIdx]) : i;
+        const p1Name = parts[p1Idx] || 'TBD';
+        const p2Name = parts[p2Idx] || 'TBD';
+        const court = courtIdx !== -1 ? parts[courtIdx] : 'Court 1';
+        const scheduledTime = timeIdx !== -1 ? parts[timeIdx] : undefined;
+
+        parsedMatches.push({
+          id: `m-upload-${Date.now()}-${i}`,
+          tournament_id: tournament.id,
+          event_id: selectedEvent,
+          fixture_round: 0,
+          fixture_position: pos,
+          player1_id: p1Name.toLowerCase() === 'bye' ? 'BYE' : p1Name.toLowerCase() === 'tbd' ? 'TBD' : `up-${i}-1`,
+          player1_name: p1Name,
+          player2_id: p2Name.toLowerCase() === 'bye' ? 'BYE' : p2Name.toLowerCase() === 'tbd' ? 'TBD' : `up-${i}-2`,
+          player2_name: p2Name,
+          court: court || undefined,
+          scheduled_time: scheduledTime || undefined,
+          status: 'scheduled',
+          sets: [],
+          sport: chosenSport,
+          round_name: roundName,
+        });
+      }
+
+      if (parsedMatches.length === 0) {
+        throw new Error('No valid match rows parsed from CSV.');
+      }
+
+      await saveMatchesBatch(parsedMatches);
+      const freshMatches = await getMatches();
+      setMatches(freshMatches);
+      setShowUploadModal(false);
+      setUploadText('');
+      alert(`Successfully imported and scheduled ${parsedMatches.length} matches!`);
+    } catch (err: any) {
+      console.error('Fixture upload error:', err);
+      setUploadError(err.message || 'Failed to parse and upload fixtures.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleEditMatchClick = (match: Match) => {
+    setSelectedMatch(match);
+    setSwapPlayer1(match.player1_id || 'tbd');
+    setSwapPlayer2(match.player2_id || 'tbd');
+    setShowSwapModal(true);
+  };
   const [teams, setTeams] = useState<Team[]>([]);
 
   // Load initial data
@@ -42,7 +183,13 @@ export default function FixturesPage() {
         setEvents(uniqueEvents);
         setMatches(mts);
         
-        if (uniqueEvents.length > 0) {
+        const matchingEvents = uniqueEvents.filter(ev => {
+          const t = uniqueTours.find(tt => tt.id === ev.tournament_id);
+          return activeSport === 'all' || (t && t.sport === activeSport) || ev.sport === activeSport;
+        });
+        if (matchingEvents.length > 0) {
+          setSelectedEvent(matchingEvents[0].id);
+        } else if (uniqueEvents.length > 0) {
           setSelectedEvent(uniqueEvents[0].id);
         }
       } catch (err) {
@@ -52,7 +199,31 @@ export default function FixturesPage() {
       }
     }
     loadData();
-  }, []);
+  }, [activeSport]);
+
+  // Update selected event if active sport changes and the current event doesn't match it
+  useEffect(() => {
+    if (activeSport === 'all') return;
+    const currentEvent = events.find(e => e.id === selectedEvent);
+    if (currentEvent) {
+      const currentTour = tournaments.find(t => t.id === currentEvent.tournament_id);
+      const matchesSport = (currentTour && currentTour.sport === activeSport) || currentEvent.sport === activeSport;
+      if (matchesSport) return;
+    }
+    // Find first event that matches activeSport
+    const matchingEvent = events.find(ev => {
+      const t = tournaments.find(tt => tt.id === ev.tournament_id);
+      return (t && t.sport === activeSport) || ev.sport === activeSport;
+    });
+    if (matchingEvent) {
+      setSelectedEvent(matchingEvent.id);
+      const t = tournaments.find(tt => tt.id === matchingEvent.tournament_id);
+      setEventSearchQuery(`${t?.name || 'Tournament'} — ${matchingEvent.event_name}`);
+    } else {
+      setSelectedEvent('');
+      setEventSearchQuery('');
+    }
+  }, [activeSport, events, tournaments, selectedEvent]);
 
   const event = events.find(e => e.id === selectedEvent);
   const tournament = event ? tournaments.find(t => t.id === event.tournament_id) : null;
@@ -112,15 +283,20 @@ export default function FixturesPage() {
 
     try {
       setGenerating(false);
+      const chosenSport = event.sport || tournament?.sport || activeSport || 'badminton';
       const bracket = generateKnockoutBracket({
         eventId: event.id,
         tournamentId: event.tournament_id,
         registrations: competitorRegs,
         tournamentType: tournament.type,
         teamTieEvents: tournament.team_tie_events || ['MS', 'MD', 'XD'],
+        sport: chosenSport,
       });
 
-      const flatMatches = bracket.rounds.flatMap(r => r.matches);
+      const flatMatches = bracket.rounds.flatMap(r => r.matches.map(m => ({
+        ...m,
+        sport: m.sport || chosenSport,
+      })));
       await saveMatchesBatch(flatMatches);
 
       // Refresh local state matches
@@ -135,19 +311,237 @@ export default function FixturesPage() {
     }
   };
 
+  const handleGenerateRoundRobin = async () => {
+    if (!event || !tournament) return;
+    
+    let competitorRegs: Registration[] = [];
+    if (tournament.type === 'team') {
+      if (teams.length < 2) {
+        alert('Need at least 2 teams created for this tournament to generate fixtures.');
+        return;
+      }
+      competitorRegs = teams.map((team, idx) => ({
+        id: `t-reg-${team.id}`,
+        tournament_id: tournament.id,
+        event_id: event.id,
+        player_id: team.id,
+        player_name: team.name,
+        player_email: 'team@matchpoint.io',
+        status: 'approved' as const,
+        registered_at: new Date().toISOString(),
+        seed: idx + 1,
+      }));
+    } else {
+      if (approvedRegs.length < 2) {
+        alert('Need at least 2 approved registrations to generate group pool.');
+        return;
+      }
+      competitorRegs = approvedRegs;
+    }
+
+    try {
+      const chosenSport = event.sport || tournament?.sport || activeSport || 'badminton';
+      const poolMatches = generateRoundRobinFixtures({
+        eventId: event.id,
+        tournamentId: event.tournament_id,
+        registrations: competitorRegs,
+        tournamentType: tournament.type,
+        teamTieEvents: tournament.team_tie_events || ['MS', 'MD', 'XD'],
+        sport: chosenSport,
+        groupName: 'Pool Stage',
+      }).map(m => ({
+        ...m,
+        sport: m.sport || chosenSport,
+      }));
+
+      await saveMatchesBatch(poolMatches);
+      const updatedMatches = await getMatches();
+      setMatches(updatedMatches);
+      alert(`Generated ${poolMatches.length} Round-Robin pool matches successfully!`);
+    } catch (err) {
+      console.error('Failed to generate Round Robin matches:', err);
+      alert('Failed to save Round Robin matches.');
+    }
+  };
+
+  const handleSwapSave = async () => {
+    if (!selectedMatch) return;
+
+    if (swapPlayer1 !== 'tbd' && swapPlayer1 !== 'bye' && swapPlayer1 === swapPlayer2) {
+      alert("Competitor 1 and Competitor 2 cannot be the same player/team.");
+      return;
+    }
+    
+    let name1 = 'TBD';
+    let name2 = 'TBD';
+    
+    if (swapPlayer1 === 'bye') name1 = 'BYE';
+    else if (swapPlayer1 === 'tbd') name1 = 'TBD';
+    else {
+      const comp = tournament?.type === 'team'
+        ? teams.find(t => t.id === swapPlayer1)
+        : approvedRegs.find(r => r.player_id === swapPlayer1);
+      name1 = tournament?.type === 'team' ? (comp as Team)?.name : (comp as Registration)?.player_name || 'TBD';
+    }
+
+    if (swapPlayer2 === 'bye') name2 = 'BYE';
+    else if (swapPlayer2 === 'tbd') name2 = 'TBD';
+    else {
+      const comp = tournament?.type === 'team'
+        ? teams.find(t => t.id === swapPlayer2)
+        : approvedRegs.find(r => r.player_id === swapPlayer2);
+      name2 = tournament?.type === 'team' ? (comp as Team)?.name : (comp as Registration)?.player_name || 'TBD';
+    }
+
+    try {
+      await updateMatchPlayers(selectedMatch.id, name1, name2, swapPlayer1, swapPlayer2);
+      
+      setMatches(prev => prev.map(m => m.id === selectedMatch.id ? {
+        ...m,
+        player1_id: swapPlayer1,
+        player1_name: name1,
+        player2_id: swapPlayer2,
+        player2_name: name2
+      } : m));
+      
+      setShowSwapModal(false);
+      setSelectedMatch(null);
+    } catch (err) {
+      console.error('Failed to swap competitors:', err);
+      alert('Failed to swap competitors.');
+    }
+  };
+
+  const handleAddMatchSave = async () => {
+    if (!selectedEvent || !tournament) return;
+
+    if (addPlayer1 !== 'tbd' && addPlayer1 !== 'bye' && addPlayer1 === addPlayer2) {
+      alert("Competitor 1 and Competitor 2 cannot be the same player/team.");
+      return;
+    }
+    
+    let name1 = 'TBD';
+    let name2 = 'TBD';
+    
+    if (addPlayer1 === 'bye') name1 = 'BYE';
+    else if (addPlayer1 === 'tbd') name1 = 'TBD';
+    else {
+      const comp = tournament.type === 'team'
+        ? teams.find(t => t.id === addPlayer1)
+        : approvedRegs.find(r => r.player_id === addPlayer1);
+      name1 = tournament.type === 'team' ? (comp as Team)?.name : (comp as Registration)?.player_name || 'TBD';
+    }
+
+    if (addPlayer2 === 'bye') name2 = 'BYE';
+    else if (addPlayer2 === 'tbd') name2 = 'TBD';
+    else {
+      const comp = tournament.type === 'team'
+        ? teams.find(t => t.id === addPlayer2)
+        : approvedRegs.find(r => r.player_id === addPlayer2);
+      name2 = tournament.type === 'team' ? (comp as Team)?.name : (comp as Registration)?.player_name || 'TBD';
+    }
+
+    const chosenSport = event?.sport || tournament?.sport || activeSport || 'badminton';
+    const newMatch: Match = {
+      id: `m-custom-${Date.now()}`,
+      tournament_id: tournament.id,
+      event_id: selectedEvent,
+      fixture_round: Number(addRound),
+      fixture_position: Number(addPosition),
+      player1_id: addPlayer1,
+      player1_name: name1,
+      player2_id: addPlayer2,
+      player2_name: name2,
+      court: addCourt || undefined,
+      scheduled_time: addTime || undefined,
+      status: 'scheduled',
+      sets: [],
+      sport: chosenSport,
+      round_name: `Round ${addRound}`,
+    };
+
+    try {
+      await createMatch(newMatch);
+      setMatches(prev => [...prev, newMatch]);
+      setShowAddMatchModal(false);
+    } catch (err) {
+      console.error('Failed to add custom match:', err);
+      alert('Failed to add custom match.');
+    }
+  };
+
+  const handleDeleteMatch = async (matchId: string) => {
+    if (!confirm('Are you sure you want to delete this match permanently?')) return;
+    try {
+      await deleteMatch(matchId);
+      setMatches(prev => prev.filter(m => m.id !== matchId));
+    } catch (err) {
+      console.error('Failed to delete match:', err);
+      alert('Failed to delete match.');
+    }
+  };
+
   // Group existing matches by round
   const matchesByRound = existingMatches.reduce((acc, m) => {
-    if (!acc[m.fixture_round]) acc[m.fixture_round] = [];
-    acc[m.fixture_round].push(m);
+    const round = m.fixture_round ?? 0;
+    if (!acc[round]) acc[round] = [];
+    acc[round].push(m);
     return acc;
   }, {} as Record<number, Match[]>);
+
+  const handleRenameRound = async (roundNum: number, newName: string) => {
+    if (!selectedEvent) return;
+    
+    // Case 1: If it's a generated preview bracket (not saved to DB yet)
+    if (generatedBracket) {
+      setGeneratedBracket(prev => {
+        if (!prev) return null;
+        const updatedRounds = prev.rounds.map(r => 
+          r.round_number === roundNum ? { ...r, round_name: newName } : r
+        );
+        // Also update round_name in the matches inside this round in the preview
+        const updatedRoundsWithMatches = updatedRounds.map(r => {
+          if (r.round_number === roundNum) {
+            return {
+              ...r,
+              matches: r.matches.map(m => ({ ...m, round_name: newName }))
+            };
+          }
+          return r;
+        });
+        return { rounds: updatedRoundsWithMatches };
+      });
+      return;
+    }
+
+    // Case 2: Saved matches (in database)
+    try {
+      setLoading(true);
+      await updateRoundName(selectedEvent, roundNum, newName);
+      
+      // Update local state matches
+      setMatches(prev => prev.map(m => 
+        (m.event_id === selectedEvent && m.fixture_round === roundNum) 
+          ? { ...m, round_name: newName } 
+          : m
+      ));
+    } catch (err) {
+      console.error('Failed to update round name:', err);
+      alert('Failed to update round name.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const roundNames = (roundNum: number, total: number) => {
     const fromFinal = total - roundNum;
     switch (fromFinal) {
-      case 0: return 'Final';
-      case 1: return 'Semi Finals';
-      case 2: return 'Quarter Finals';
+      case 1: return 'Final';
+      case 2: return 'Semi Finals';
+      case 3: return 'Quarter Finals';
+      case 4: return 'Round of 16';
+      case 5: return 'Round of 32';
+      case 6: return 'Round of 64';
       default: return `Round ${roundNum + 1}`;
     }
   };
@@ -168,24 +562,83 @@ export default function FixturesPage() {
         </div>
       ) : (
         <>
-          {/* Event Selector */}
+          {/* Searchable Event Selector */}
           <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap', alignItems: 'center' }}>
-            <select
-              className="input"
-              style={{ width: 'auto', minWidth: 280 }}
-              value={selectedEvent}
-              onChange={e => { setSelectedEvent(e.target.value); setGeneratedBracket(null); }}
-            >
-              {events.length === 0 && <option value="">No events configured</option>}
-              {events.map(ev => {
-                const t = tournaments.find(tt => tt.id === ev.tournament_id);
-                return (
-                  <option key={ev.id} value={ev.id}>
-                    {t?.name || 'Tournament'} — {ev.event_name}
-                  </option>
-                );
-              })}
-            </select>
+            <div style={{ position: 'relative', width: 340 }}>
+              <input
+                className="input"
+                placeholder="🔍 Search tournament or event..."
+                value={eventSearchQuery}
+                onChange={e => {
+                  setEventSearchQuery(e.target.value);
+                  setShowEventSuggestions(true);
+                }}
+                onFocus={() => setShowEventSuggestions(true)}
+                onBlur={() => setTimeout(() => setShowEventSuggestions(false), 200)}
+                style={{ paddingRight: 32 }}
+              />
+              <span style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }}>
+                ▼
+              </span>
+
+              {showEventSuggestions && (
+                <div style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  right: 0,
+                  zIndex: 50,
+                  background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: 'var(--shadow-lg)',
+                  maxHeight: 240,
+                  overflowY: 'auto',
+                  marginTop: 4,
+                }}>
+                  {events
+                    .filter(ev => {
+                      const t = tournaments.find(tt => tt.id === ev.tournament_id);
+                      return activeSport === 'all' || (t && t.sport === activeSport) || ev.sport === activeSport;
+                    })
+                    .map(ev => {
+                      const t = tournaments.find(tt => tt.id === ev.tournament_id);
+                      const label = `${t?.name || 'Tournament'} — ${ev.event_name}`;
+                      return { ev, label };
+                    })
+                    .filter(item => item.label.toLowerCase().includes(eventSearchQuery.toLowerCase()))
+                    .map(item => (
+                      <div
+                        key={item.ev.id}
+                        style={{
+                          padding: '10px 12px',
+                          fontSize: 13,
+                          cursor: 'pointer',
+                          borderBottom: '1px solid var(--border)',
+                          color: item.ev.id === selectedEvent ? 'var(--accent)' : 'var(--text-primary)',
+                          background: item.ev.id === selectedEvent ? 'var(--accent-subtle)' : 'transparent',
+                        }}
+                        onClick={() => {
+                          setSelectedEvent(item.ev.id);
+                          setEventSearchQuery(item.label);
+                          setGeneratedBracket(null);
+                          setShowEventSuggestions(false);
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.background = 'var(--accent-subtle)'}
+                        onMouseLeave={e => e.currentTarget.style.background = item.ev.id === selectedEvent ? 'var(--accent-subtle)' : 'transparent'}
+                      >
+                        🏸 {item.label}
+                      </div>
+                    ))
+                  }
+                  {events.length === 0 && (
+                    <div style={{ padding: 12, fontSize: 13, color: 'var(--text-muted)', textAlign: 'center' }}>
+                      No events configured
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             <button
               className="btn btn-primary"
@@ -193,10 +646,57 @@ export default function FixturesPage() {
               disabled={tournament?.type === 'team' ? teams.length < 2 : approvedRegs.length < 2}
             >
               {hasExistingFixtures || generatedBracket
-                ? <><IconRefreshCw size={16} /> Regenerate Bracket</>
-                : <><IconZap size={16} /> Generate Bracket</>
+                ? <><IconRefreshCw size={16} /> Regenerate Knockout</>
+                : <><IconZap size={16} /> Generate Knockout</>
               }
             </button>
+
+            <button
+              className="btn btn-secondary"
+              onClick={handleGenerateRoundRobin}
+              disabled={tournament?.type === 'team' ? teams.length < 2 : approvedRegs.length < 2}
+              style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+            >
+              🏐 Generate Round-Robin Pool
+            </button>
+
+            <button
+              className="btn btn-secondary"
+              onClick={() => {
+                setUploadError('');
+                setUploadText('');
+                setShowUploadModal(true);
+              }}
+              style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+            >
+              📁 Upload Fixtures (CSV)
+            </button>
+
+            {hasExistingFixtures && (
+              <>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    setAddRound(1);
+                    setAddPosition(0);
+                    setAddPlayer1('tbd');
+                    setAddPlayer2('tbd');
+                    setAddCourt('Court 1');
+                    setAddTime('');
+                    setShowAddMatchModal(true);
+                  }}
+                >
+                  ➕ Add Custom Match
+                </button>
+                {tournament && event && (
+                  <PdfReportGenerator
+                    tournament={tournament}
+                    event={event}
+                    matches={existingMatches}
+                  />
+                )}
+              </>
+            )}
           </div>
 
           {event && tournament && (
@@ -244,6 +744,9 @@ export default function FixturesPage() {
                       matches={round.matches}
                       roundIndex={i}
                       totalRounds={generatedBracket.rounds.length}
+                      onEdit={handleEditMatchClick}
+                      onDelete={handleDeleteMatch}
+                      onRename={handleRenameRound}
                     />
                   ))
                 ) : (
@@ -252,10 +755,16 @@ export default function FixturesPage() {
                     .map(([roundNum, matches]) => (
                       <BracketRound
                         key={roundNum}
-                        roundName={roundNames(Number(roundNum), totalRounds)}
+                        roundName={
+                          matches.find(m => m.round_name)?.round_name ||
+                          roundNames(Number(roundNum), totalRounds)
+                        }
                         matches={matches}
                         roundIndex={Number(roundNum)}
                         totalRounds={totalRounds}
+                        onEdit={handleEditMatchClick}
+                        onDelete={handleDeleteMatch}
+                        onRename={handleRenameRound}
                       />
                     ))
                 )}
@@ -270,6 +779,271 @@ export default function FixturesPage() {
               <p style={{ fontSize: 14 }}>Select an event and click &quot;Generate Bracket&quot; to create fixtures</p>
             </div>
           )}
+
+          {/* Swap Competitors Modal */}
+          {showSwapModal && selectedMatch && (
+            <div className="modal-overlay">
+              <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: 480, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+                  <h2 style={{ fontSize: 20, fontWeight: 700 }}>Swap / Assign Competitors</h2>
+                  <button className="btn btn-ghost btn-icon" onClick={() => { setShowSwapModal(false); setSelectedMatch(null); }}><IconX size={18} /></button>
+                </div>
+                
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  <div>
+                    <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)' }}>Competitor 1</label>
+                    <select
+                      className="input"
+                      value={swapPlayer1}
+                      onChange={e => setSwapPlayer1(e.target.value)}
+                    >
+                      <option value="tbd">TBD (To Be Decided)</option>
+                      <option value="bye">BYE (Free Pass)</option>
+                      {tournament?.type === 'team' ? (
+                        teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)
+                      ) : (
+                        approvedRegs.map(r => <option key={r.player_id} value={r.player_id}>{r.player_name}</option>)
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)' }}>Competitor 2</label>
+                    <select
+                      className="input"
+                      value={swapPlayer2}
+                      onChange={e => setSwapPlayer2(e.target.value)}
+                    >
+                      <option value="tbd">TBD (To Be Decided)</option>
+                      <option value="bye">BYE (Free Pass)</option>
+                      {tournament?.type === 'team' ? (
+                        teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)
+                      ) : (
+                        approvedRegs.map(r => <option key={r.player_id} value={r.player_id}>{r.player_name}</option>)
+                      )}
+                    </select>
+                  </div>
+                </div>
+
+                {swapPlayer1 !== 'tbd' && swapPlayer1 !== 'bye' && swapPlayer1 === swapPlayer2 && (
+                  <div style={{ color: '#ef4444', fontSize: 13, marginTop: 12, display: 'flex', alignItems: 'center', gap: 6, fontWeight: 500 }}>
+                    <span>⚠️</span> Competitor 1 and Competitor 2 cannot be the same.
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
+                  <button className="btn btn-secondary" onClick={() => { setShowSwapModal(false); setSelectedMatch(null); }}>Cancel</button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleSwapSave}
+                    disabled={swapPlayer1 !== 'tbd' && swapPlayer1 !== 'bye' && swapPlayer1 === swapPlayer2}
+                    style={{
+                      opacity: (swapPlayer1 !== 'tbd' && swapPlayer1 !== 'bye' && swapPlayer1 === swapPlayer2) ? 0.6 : 1,
+                      cursor: (swapPlayer1 !== 'tbd' && swapPlayer1 !== 'bye' && swapPlayer1 === swapPlayer2) ? 'not-allowed' : 'pointer'
+                    }}
+                  >
+                    Save Changes
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Add Custom Match Modal */}
+          {showAddMatchModal && (
+            <div className="modal-overlay">
+              <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: 500, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+                  <h2 style={{ fontSize: 20, fontWeight: 700 }}>Add Custom Match</h2>
+                  <button className="btn btn-ghost btn-icon" onClick={() => setShowAddMatchModal(false)}><IconX size={18} /></button>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  <div style={{ display: 'flex', gap: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)' }}>Round Number</label>
+                      <input
+                        type="number"
+                        className="input"
+                        min={1}
+                        value={addRound}
+                        onChange={e => setAddRound(Number(e.target.value))}
+                      />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)' }}>Position (0-indexed)</label>
+                      <input
+                        type="number"
+                        className="input"
+                        min={0}
+                        value={addPosition}
+                        onChange={e => setAddPosition(Number(e.target.value))}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)' }}>Competitor 1</label>
+                    <select
+                      className="input"
+                      value={addPlayer1}
+                      onChange={e => setAddPlayer1(e.target.value)}
+                    >
+                      <option value="tbd">TBD (To Be Decided)</option>
+                      <option value="bye">BYE (Free Pass)</option>
+                      {tournament?.type === 'team' ? (
+                        teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)
+                      ) : (
+                        approvedRegs.map(r => <option key={r.player_id} value={r.player_id}>{r.player_name}</option>)
+                      )}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)' }}>Competitor 2</label>
+                    <select
+                      className="input"
+                      value={addPlayer2}
+                      onChange={e => setAddPlayer2(e.target.value)}
+                    >
+                      <option value="tbd">TBD (To Be Decided)</option>
+                      <option value="bye">BYE (Free Pass)</option>
+                      {tournament?.type === 'team' ? (
+                        teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)
+                      ) : (
+                        approvedRegs.map(r => <option key={r.player_id} value={r.player_id}>{r.player_name}</option>)
+                      )}
+                    </select>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)' }}>Court</label>
+                      <input
+                        type="text"
+                        className="input"
+                        placeholder="Court 1"
+                        value={addCourt}
+                        onChange={e => setAddCourt(e.target.value)}
+                      />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500, color: 'var(--text-secondary)' }}>Scheduled Time</label>
+                      <input
+                        type="datetime-local"
+                        className="input"
+                        value={addTime}
+                        onChange={e => setAddTime(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {addPlayer1 !== 'tbd' && addPlayer1 !== 'bye' && addPlayer1 === addPlayer2 && (
+                  <div style={{ color: '#ef4444', fontSize: 13, marginTop: 12, display: 'flex', alignItems: 'center', gap: 6, fontWeight: 500 }}>
+                    <span>⚠️</span> Competitor 1 and Competitor 2 cannot be the same.
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 24 }}>
+                  <button className="btn btn-secondary" onClick={() => setShowAddMatchModal(false)}>Cancel</button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleAddMatchSave}
+                    disabled={addPlayer1 !== 'tbd' && addPlayer1 !== 'bye' && addPlayer1 === addPlayer2}
+                    style={{
+                      opacity: (addPlayer1 !== 'tbd' && addPlayer1 !== 'bye' && addPlayer1 === addPlayer2) ? 0.6 : 1,
+                      cursor: (addPlayer1 !== 'tbd' && addPlayer1 !== 'bye' && addPlayer1 === addPlayer2) ? 'not-allowed' : 'pointer'
+                    }}
+                  >
+                    Add Match
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Bulk Upload Fixture CSV Modal */}
+          {showUploadModal && (
+            <div className="modal-backdrop" onClick={() => setShowUploadModal(false)}>
+              <div className="modal-card" style={{ maxWidth: 640 }} onClick={e => e.stopPropagation()}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                  <h3 style={{ fontSize: 18, fontWeight: 700 }}>📁 Upload Custom Fixture Schedule</h3>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setShowUploadModal(false)}>✕</button>
+                </div>
+
+                <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.5 }}>
+                  Import your custom fixture draw or schedule directly via CSV. Matches will be immediately populated and available across the Match and Scoring screens.
+                </p>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)' }}>CSV Format: RoundName, Position, Player1_or_Team1, Player2_or_Team2, Court, ScheduledTime</span>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={handleDownloadFixtureTemplate}
+                    style={{ fontSize: 11 }}
+                  >
+                    ⬇️ Download CSV Template
+                  </button>
+                </div>
+
+                <div style={{ marginBottom: 16 }}>
+                  <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500 }}>
+                    Select CSV File
+                  </label>
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="input"
+                    onChange={e => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = ev => {
+                        const content = ev.target?.result as string;
+                        setUploadText(content);
+                      };
+                      reader.readAsText(file);
+                    }}
+                    style={{ padding: '6px 12px' }}
+                  />
+                </div>
+
+                <div style={{ marginBottom: 16 }}>
+                  <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500 }}>
+                    Or Paste CSV Data Directly:
+                  </label>
+                  <textarea
+                    className="input"
+                    rows={8}
+                    placeholder="RoundName,Position,Player1_or_Team1,Player2_or_Team2,Court,ScheduledTime&#10;Round 1,1,Alpha Warriors,Thunderbolts,Court 1,2026-10-10T10:00&#10;Round 1,2,Smashers,Aces,Court 2,2026-10-10T11:00"
+                    value={uploadText}
+                    onChange={e => setUploadText(e.target.value)}
+                    style={{ fontFamily: 'monospace', fontSize: 12, lineHeight: 1.4 }}
+                  />
+                </div>
+
+                {uploadError && (
+                  <div style={{ color: '#ef4444', fontSize: 13, marginBottom: 16, background: 'rgba(239, 68, 68, 0.1)', padding: '10px 14px', borderRadius: 'var(--radius-md)' }}>
+                    ⚠️ {uploadError}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
+                  <button className="btn btn-secondary" onClick={() => setShowUploadModal(false)}>Cancel</button>
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleProcessUpload}
+                    disabled={isUploading || !uploadText.trim()}
+                    style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                  >
+                    {isUploading ? 'Importing Fixtures...' : '🚀 Import & Save Fixtures'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -280,37 +1054,123 @@ function BracketRound({
   roundName,
   matches,
   roundIndex,
+  onEdit,
+  onDelete,
+  onRename,
 }: {
   roundName: string;
   matches: Match[];
   roundIndex: number;
   totalRounds: number;
+  onEdit: (match: Match) => void;
+  onDelete: (matchId: string) => void;
+  onRename?: (roundIndex: number, newName: string) => void;
 }) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editName, setEditName] = useState(roundName);
+
+  // Sync state if roundName changes externally
+  useEffect(() => {
+    setEditName(roundName);
+  }, [roundName]);
+
+  const handleSave = () => {
+    setIsEditing(false);
+    if (editName.trim() && editName.trim() !== roundName && onRename) {
+      onRename(roundIndex, editName.trim());
+    }
+  };
+
   const gap = Math.pow(2, roundIndex) * 20;
 
   return (
     <div style={{ minWidth: 240 }}>
       <div style={{
-        fontSize: 13,
-        fontWeight: 600,
-        color: 'var(--text-muted)',
-        textTransform: 'uppercase',
-        letterSpacing: '0.05em',
         marginBottom: 16,
         textAlign: 'center',
+        minHeight: 28,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
       }}>
-        {roundName}
+        {isEditing ? (
+          <input
+            className="input"
+            value={editName}
+            onChange={e => setEditName(e.target.value)}
+            onBlur={handleSave}
+            onKeyDown={e => {
+              if (e.key === 'Enter') handleSave();
+              if (e.key === 'Escape') {
+                setEditName(roundName);
+                setIsEditing(false);
+              }
+            }}
+            autoFocus
+            style={{
+              padding: '2px 8px',
+              fontSize: 13,
+              fontWeight: 600,
+              height: 28,
+              textAlign: 'center',
+              width: '100%',
+              maxWidth: 180,
+            }}
+          />
+        ) : (
+          <div 
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: 'var(--text-muted)',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              cursor: 'pointer',
+              padding: '2px 8px',
+              borderRadius: 'var(--radius-sm)',
+            }}
+            onClick={() => setIsEditing(true)}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'var(--bg-elevated)';
+              e.currentTarget.style.color = 'var(--text-primary)';
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'transparent';
+              e.currentTarget.style.color = 'var(--text-muted)';
+            }}
+            title="Click to rename round"
+          >
+            {roundName} ✏️
+          </div>
+        )}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap, justifyContent: 'center' }}>
         {matches.map(match => (
-          <BracketMatchCard key={match.id} match={match} />
+          <BracketMatchCard
+            key={match.id}
+            match={match}
+            onEdit={() => onEdit(match)}
+            onDelete={() => onDelete(match.id)}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function BracketMatchCard({ match }: { match: Match }) {
+function BracketMatchCard({
+  match,
+  onEdit,
+  onDelete
+}: {
+  match: Match;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
   const isLive = match.status === 'running';
   const isComplete = match.status === 'completed';
 
@@ -334,10 +1194,47 @@ function BracketMatchCard({ match }: { match: Match }) {
   }
 
   return (
-    <div className="bracket-match" style={{
-      border: isLive ? '1px solid rgba(34, 197, 94, 0.4)' : undefined,
-      boxShadow: isLive ? '0 0 16px rgba(34, 197, 94, 0.15)' : undefined,
-    }}>
+    <div
+      className="bracket-match"
+      onClick={onEdit}
+      style={{
+        position: 'relative',
+        cursor: 'pointer',
+        border: isLive ? '1px solid rgba(34, 197, 94, 0.4)' : undefined,
+        boxShadow: isLive ? '0 0 16px rgba(34, 197, 94, 0.15)' : undefined,
+      }}
+    >
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        title="Delete Match"
+        style={{
+          position: 'absolute',
+          top: 6,
+          right: 6,
+          background: 'rgba(239, 68, 68, 0.1)',
+          border: 'none',
+          borderRadius: '50%',
+          width: 22,
+          height: 22,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: 'pointer',
+          color: 'var(--score-loss)',
+          fontSize: 10,
+          opacity: 0.5,
+          zIndex: 10,
+          transition: 'opacity 0.2s',
+        }}
+        onMouseEnter={e => e.currentTarget.style.opacity = '1'}
+        onMouseLeave={e => e.currentTarget.style.opacity = '0.5'}
+      >
+        🗑️
+      </button>
+
       {isLive && (
         <div style={{
           padding: '4px 8px',
@@ -350,10 +1247,11 @@ function BracketMatchCard({ match }: { match: Match }) {
           gap: 4,
         }}>
           <span className="live-dot" style={{ width: 5, height: 5 }} /> LIVE
-          {match.court && <span style={{ marginLeft: 'auto', color: 'var(--text-muted)' }}>{match.court}</span>}
+          {match.court && <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', marginRight: 24 }}>{match.court}</span>}
         </div>
       )}
-      <div className={`bracket-player ${isComplete && match.winner_id === match.player1_id ? 'winner' : ''}`}>
+      
+      <div className={`bracket-player ${isComplete && match.winner_id === match.player1_id ? 'winner' : ''}`} style={{ paddingRight: 24 }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {isComplete && match.winner_id === match.player1_id && <IconTrophy size={12} />}
           {match.player1_name}
@@ -362,7 +1260,8 @@ function BracketMatchCard({ match }: { match: Match }) {
           {isComplete || isLive ? score1 : ''}
         </span>
       </div>
-      <div className={`bracket-player ${isComplete && match.winner_id === match.player2_id ? 'winner' : ''}`}>
+      
+      <div className={`bracket-player ${isComplete && match.winner_id === match.player2_id ? 'winner' : ''}`} style={{ paddingRight: 24 }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {isComplete && match.winner_id === match.player2_id && <IconTrophy size={12} />}
           {match.player2_name}

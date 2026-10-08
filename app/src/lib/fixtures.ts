@@ -11,6 +11,7 @@ interface FixtureConfig {
   courts?: string[];
   tournamentType?: 'individual' | 'team';
   teamTieEvents?: string[];
+  sport?: string;
 }
 
 interface GeneratedFixture {
@@ -41,7 +42,7 @@ function getRoundName(roundIndex: number, totalRounds: number): string {
 }
 
 export function generateKnockoutBracket(config: FixtureConfig): GeneratedFixture {
-  const { eventId, tournamentId, registrations, courts = ['Court 1', 'Court 2'], tournamentType = 'individual', teamTieEvents = [] } = config;
+  const { eventId, tournamentId, registrations, courts = ['Court 1', 'Court 2'], tournamentType = 'individual', teamTieEvents = [], sport } = config;
 
   // Sort by seed (seeded players first)
   const sorted = [...registrations]
@@ -85,12 +86,14 @@ export function generateKnockoutBracket(config: FixtureConfig): GeneratedFixture
       fixture_position: i,
       court: courts[i % courts.length],
       player1_id: p1?.player_id || 'BYE',
-      player1_name: p1?.player_name || 'BYE',
+      player1_name: p1 ? (p1.partner_name ? `${p1.player_name}/${p1.partner_name}` : p1.player_name) : 'BYE',
       player2_id: p2?.player_id || 'BYE',
-      player2_name: p2?.player_name || 'BYE',
+      player2_name: p2 ? (p2.partner_name ? `${p2.player_name}/${p2.partner_name}` : p2.player_name) : 'BYE',
       status: (isBye ? 'completed' : 'scheduled') as MatchStatus,
       winner_id: isBye ? (p1 ? p1.player_id : p2?.player_id) : undefined,
       sets: [],
+      round_name: getRoundName(0, totalRounds),
+      sport,
       sub_matches: tournamentType === 'team' && teamTieEvents.length > 0 && !isBye
         ? teamTieEvents.map((evt, idx) => ({
             id: `sub-m-${eventId}-r0-${i}-${evt.replace(/[^a-zA-Z0-9]/g, '-')}-${idx}`,
@@ -138,6 +141,8 @@ export function generateKnockoutBracket(config: FixtureConfig): GeneratedFixture
         player2_name: 'TBD',
         status: 'scheduled' as MatchStatus,
         sets: [],
+        round_name: getRoundName(r, totalRounds),
+        sport,
         sub_matches: tournamentType === 'team' && teamTieEvents.length > 0
           ? teamTieEvents.map((evt, idx) => ({
               id: `sub-m-${eventId}-r${r}-${i}-${evt.replace(/[^a-zA-Z0-9]/g, '-')}-${idx}`,
@@ -161,4 +166,76 @@ export function generateKnockoutBracket(config: FixtureConfig): GeneratedFixture
   }
 
   return { rounds };
+}
+
+/**
+ * Generates Round-Robin pool matches for a group of teams/participants.
+ */
+export function generateRoundRobinFixtures(config: FixtureConfig & { groupName?: string }): Match[] {
+  const { eventId, tournamentId, registrations, courts = ['Court 1', 'Court 2'], tournamentType = 'individual', teamTieEvents = [], sport, groupName = 'Pool A' } = config;
+
+  const approved = [...registrations].filter(r => r.status === 'approved');
+  const n = approved.length;
+  if (n < 2) return [];
+
+  // Berger tables round-robin pairing
+  const participants = [...approved];
+  if (participants.length % 2 !== 0) {
+    participants.push({
+      id: 'BYE',
+      tournament_id: tournamentId,
+      event_id: eventId,
+      player_id: 'BYE',
+      player_name: 'BYE',
+      player_email: '',
+      status: 'approved',
+      registered_at: '',
+    });
+  }
+
+  const numRounds = participants.length - 1;
+  const half = participants.length / 2;
+  const matches: Match[] = [];
+
+  for (let r = 0; r < numRounds; r++) {
+    for (let i = 0; i < half; i++) {
+      const p1 = participants[i];
+      const p2 = participants[participants.length - 1 - i];
+
+      if (p1.player_id !== 'BYE' && p2.player_id !== 'BYE') {
+        matches.push({
+          id: `rr-${eventId}-${groupName.replace(/\s+/g, '').toLowerCase()}-r${r + 1}-m${i + 1}`,
+          tournament_id: tournamentId,
+          event_id: eventId,
+          fixture_round: r + 1,
+          round_name: `${groupName} — Matchday ${r + 1}`,
+          fixture_position: i,
+          court: courts[(r * half + i) % courts.length],
+          player1_id: p1.player_id,
+          player1_name: p1.player_name,
+          player2_id: p2.player_id,
+          player2_name: p2.player_name,
+          status: 'scheduled' as MatchStatus,
+          sets: [],
+          sport,
+          sub_matches: tournamentType === 'team' && teamTieEvents.length > 0
+            ? teamTieEvents.map((evt, idx) => ({
+                id: `sub-rr-${eventId}-r${r + 1}-m${i + 1}-${evt.replace(/[^a-zA-Z0-9]/g, '-')}-${idx}`,
+                event_type: evt,
+                player1_names: [],
+                player2_names: [],
+                sets: [],
+                status: 'scheduled' as MatchStatus,
+              }))
+            : undefined,
+        });
+      }
+    }
+
+    // Rotate elements except the first
+    const last = participants.pop()!;
+    participants.splice(1, 0, last);
+  }
+
+  return matches;
 }

@@ -4,7 +4,6 @@ import React, { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
-import { UserRole } from '@/types';
 import { IconShuttlecock } from '@/components/icons';
 
 export default function RegisterPage() {
@@ -13,7 +12,7 @@ export default function RegisterPage() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState<UserRole>('player');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -23,19 +22,17 @@ export default function RegisterPage() {
       setError('Password must be at least 4 characters');
       return;
     }
-    const success = await register(name, email, password, role);
+    if (password !== confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+    const success = await register(name, email, password);
     if (success) {
       router.push('/dashboard');
     } else {
-      setError('Registration failed. Please try again.');
+      setError('Registration failed. Email may already be registered.');
     }
   };
-
-  const roles: { value: UserRole; label: string; description: string }[] = [
-    { value: 'player', label: 'Player', description: 'Register for tournaments and track your matches' },
-    { value: 'admin', label: 'Organizer', description: 'Create and manage tournaments' },
-    { value: 'umpire', label: 'Umpire', description: 'Score matches during tournaments' },
-  ];
 
   return (
     <div style={{
@@ -44,15 +41,15 @@ export default function RegisterPage() {
       alignItems: 'center',
       justifyContent: 'center',
       padding: 24,
-      background: 'var(--bg-primary)',
+      background: 'transparent',
     }}>
       <div className="hero-glow" style={{ position: 'fixed', top: -300, left: '50%', transform: 'translateX(-50%)' }} />
-      <div className="animate-slide-up" style={{ width: '100%', maxWidth: 440, position: 'relative', zIndex: 1 }}>
+      <div className="animate-slide-up" style={{ width: '100%', maxWidth: 420, position: 'relative', zIndex: 1 }}>
         {/* Logo */}
         <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'center', marginBottom: 40, textDecoration: 'none' }}>
           <div style={{
             width: 44, height: 44,
-            background: 'linear-gradient(135deg, var(--accent), #8b5cf6)',
+            background: 'linear-gradient(135deg, var(--accent), #3b82f6)',
             borderRadius: 'var(--radius-md)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}>
@@ -63,7 +60,9 @@ export default function RegisterPage() {
 
         <div className="glass-card" style={{ padding: 32 }}>
           <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 4 }}>Create your account</h1>
-          <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 28 }}>Join the badminton community</p>
+          <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 28 }}>
+            Join the badminton community — it only takes a minute
+          </p>
 
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
             <div className="input-group">
@@ -82,38 +81,8 @@ export default function RegisterPage() {
             </div>
 
             <div className="input-group">
-              <label className="input-label">I am a...</label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {roles.map(r => (
-                  <label
-                    key={r.value}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 12,
-                      padding: '12px 14px',
-                      borderRadius: 'var(--radius-md)',
-                      border: `1px solid ${role === r.value ? 'var(--accent)' : 'var(--border)'}`,
-                      background: role === r.value ? 'var(--accent-subtle)' : 'transparent',
-                      cursor: 'pointer',
-                      transition: 'all var(--transition-fast)',
-                    }}
-                  >
-                    <input
-                      type="radio"
-                      name="role"
-                      value={r.value}
-                      checked={role === r.value}
-                      onChange={() => setRole(r.value)}
-                      style={{ accentColor: 'var(--accent)' }}
-                    />
-                    <div>
-                      <div style={{ fontSize: 14, fontWeight: 600 }}>{r.label}</div>
-                      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{r.description}</div>
-                    </div>
-                  </label>
-                ))}
-              </div>
+              <label className="input-label" htmlFor="register-confirm-password">Confirm Password</label>
+              <input id="register-confirm-password" type="password" className="input" placeholder="Re-enter password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} required />
             </div>
 
             {error && <p className="error-text">{error}</p>}
@@ -122,6 +91,10 @@ export default function RegisterPage() {
               {isLoading ? 'Creating account...' : 'Create Account'}
             </button>
           </form>
+
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 16, textAlign: 'center', lineHeight: 1.5 }}>
+            You'll be asked to complete your profile (phone, gender, date of birth) after signing up.
+          </p>
         </div>
 
         <p style={{ textAlign: 'center', marginTop: 20, fontSize: 14, color: 'var(--text-secondary)' }}>

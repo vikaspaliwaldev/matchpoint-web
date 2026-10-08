@@ -38,7 +38,7 @@ export default function LoginPage() {
       alignItems: 'center',
       justifyContent: 'center',
       padding: 24,
-      background: 'var(--bg-primary)',
+      background: 'transparent',
     }}>
       <div className="hero-glow" style={{ position: 'fixed', top: -300, left: '50%', transform: 'translateX(-50%)' }} />
       <div className="animate-slide-up" style={{ width: '100%', maxWidth: 420, position: 'relative', zIndex: 1 }}>
@@ -46,7 +46,7 @@ export default function LoginPage() {
         <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'center', marginBottom: 40, textDecoration: 'none' }}>
           <div style={{
             width: 44, height: 44,
-            background: 'linear-gradient(135deg, var(--accent), #8b5cf6)',
+            background: 'linear-gradient(135deg, var(--accent), #3b82f6)',
             borderRadius: 'var(--radius-md)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}>
@@ -75,7 +75,12 @@ export default function LoginPage() {
             </div>
 
             <div className="input-group">
-              <label className="input-label" htmlFor="login-password">Password</label>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <label className="input-label" htmlFor="login-password" style={{ margin: 0 }}>Password</label>
+                <Link href="/forgot-password" style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none', fontWeight: 500 }}>
+                  Forgot password?
+                </Link>
+              </div>
               <input
                 id="login-password"
                 type="password"
@@ -93,35 +98,6 @@ export default function LoginPage() {
               {isLoading ? 'Signing in...' : 'Sign In'}
             </button>
           </form>
-
-          <div className="divider" />
-
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>Quick login with demo accounts:</p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {demoAccounts.map(account => (
-              <button
-                key={account.email}
-                className="btn btn-secondary btn-sm"
-                style={{ justifyContent: 'space-between', width: '100%' }}
-                onClick={() => {
-                  setEmail(account.email);
-                  setPassword('demo');
-                }}
-              >
-                <div style={{ textAlign: 'left' }}>
-                  <div style={{ fontSize: 13 }}>{account.label}</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{account.email}</div>
-                </div>
-                <span className="badge" style={{
-                  background: `${account.color}20`,
-                  color: account.color,
-                  fontSize: 10,
-                }}>
-                  {account.roles}
-                </span>
-              </button>
-            ))}
-          </div>
         </div>
 
         <p style={{ textAlign: 'center', marginTop: 20, fontSize: 14, color: 'var(--text-secondary)' }}>

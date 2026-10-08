@@ -1,15 +1,22 @@
 'use client';
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 import {
   getMatches,
-  updateMatchScore,
+  updateMatchScore as originalUpdateMatchScore,
   getEvents,
   getTournaments,
   getTeamsByTournament,
   getPlayers,
+  logAction,
+  saveMatchHistory,
+  getMatchById,
 } from '@/lib/supabase-service';
+import type { MatchHistoryData } from '@/lib/supabase-service';
+import MatchMediaModal from '@/components/MatchMediaModal';
 import { useAuth } from '@/lib/auth-context';
+import { useSport } from '@/lib/sport-context';
 import { Match, TournamentEvent, Tournament, Team, User, TeamSubMatch, MatchSet, MatchStatus } from '@/types';
 import {
   createInitialScoreState,
@@ -21,6 +28,13 @@ import {
   SCORING_CONFIGS,
 } from '@/lib/scoring';
 import { IconPlay, IconPause, IconUndo, IconTrophy, IconClock, IconCheck, IconArrowLeft } from '@/components/icons';
+import WinPredictorGauge from '@/components/WinPredictorGauge';
+import TableTennisScoring from '@/components/TableTennisScoring';
+import SquashScoring from '@/components/SquashScoring';
+import TennisScoring from '@/components/TennisScoring';
+import VolleyballScoring from '@/components/VolleyballScoring';
+import { AdHocMatchModal } from '@/app/dashboard/page';
+
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -29,12 +43,14 @@ function formatTime(seconds: number): string {
 }
 
 export default function ScoringPage() {
+  const { activeSport } = useSport();
   const { user } = useAuth();
   const [matches, setMatches] = useState<Match[]>([]);
   const [events, setEvents] = useState<TournamentEvent[]>([]);
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
+  const [showAdHocModal, setShowAdHocModal] = useState(false);
 
   useEffect(() => {
     async function loadMatches() {
@@ -48,15 +64,27 @@ export default function ScoringPage() {
         setEvents(evs);
         setTournaments(tours);
         
-        const umpireMatches = data.filter(
-          m => (m.status === 'running' || m.status === 'scheduled') && m.umpire_id === user?.id
-        );
-        const available = umpireMatches.length > 0
-          ? umpireMatches
-          : data.filter(m => m.status === 'running' || m.status === 'scheduled');
-          
-        if (available.length > 0) {
-          setSelectedMatchId(available[0].id);
+        // Check URL search parameter for matchId
+        const params = new URLSearchParams(window.location.search);
+        const urlMatchId = params.get('matchId');
+        if (urlMatchId && data.some(m => m.id === urlMatchId)) {
+          setSelectedMatchId(urlMatchId);
+        } else {
+          const umpireMatches = data.filter(
+            m => (m.status === 'running' || m.status === 'scheduled') && 
+                 m.umpire_id === user?.id &&
+                 (activeSport === 'all' || m.sport === activeSport)
+          );
+          const available = umpireMatches.length > 0
+            ? umpireMatches
+            : data.filter(m => (m.status === 'running' || m.status === 'scheduled') && 
+                               (activeSport === 'all' || m.sport === activeSport));
+            
+          if (available.length > 0) {
+            setSelectedMatchId(available[0].id);
+          } else {
+            setSelectedMatchId(null);
+          }
         }
       } catch (err) {
         console.error('Failed to load matches:', err);
@@ -67,12 +95,174 @@ export default function ScoringPage() {
     loadMatches();
   }, [user]);
 
+  // Subscribe to real-time match updates (specifically for max_viewers and status changes)
+  useEffect(() => {
+    if (!selectedMatchId) return;
+
+    // 1. Sync the active match state periodically (fallback for DB mode, primary for mock mode)
+    const syncInterval = setInterval(async () => {
+      try {
+        const latestMatch = await getMatchById(selectedMatchId);
+        if (latestMatch) {
+          setMatches(prev => prev.map(m => m.id === selectedMatchId ? latestMatch : m));
+        }
+      } catch (err) {
+        console.error('Failed to sync active match:', err);
+      }
+    }, 5000);
+
+    // 2. Real-time updates via Supabase if configured
+    let channel: any = null;
+    if (isSupabaseConfigured) {
+      console.log(`🔌 Umpire subscribing to real-time updates for match: ${selectedMatchId}`);
+      channel = supabase
+        .channel(`umpire-match-${selectedMatchId}`)
+        .on(
+          'postgres_changes',
+          { event: 'UPDATE', schema: 'public', table: 'matches' },
+          (payload: any) => {
+            if (payload.new.id !== selectedMatchId) return;
+            console.log('⚡ Received real-time match update for umpire:', payload.new);
+            
+            const updatedMatch = {
+              id: payload.new.id,
+              tournament_id: payload.new.tournament_id || payload.new.tournamentId,
+              event_id: payload.new.event_id || payload.new.eventId,
+              fixture_round: payload.new.fixture_round !== undefined ? payload.new.fixture_round : payload.new.fixtureRound,
+              fixture_position: payload.new.fixture_position !== undefined ? payload.new.fixture_position : payload.new.fixturePosition,
+              court: payload.new.court,
+              player1_id: payload.new.player1_id || payload.new.player1Id,
+              player1_name: payload.new.player1_name || payload.new.player1Name,
+              player2_id: payload.new.player2_id || payload.new.player2Id,
+              player2_name: payload.new.player2_name || payload.new.player2Name,
+              umpire_id: payload.new.umpire_id || payload.new.umpireId,
+              umpire_name: payload.new.umpire_name || payload.new.umpireName,
+              scheduled_time: payload.new.scheduled_time || payload.new.scheduledTime,
+              actual_start_time: payload.new.actual_start_time || payload.new.actualStartTime,
+              actual_end_time: payload.new.actual_end_time || payload.new.actualEndTime,
+              duration_seconds: payload.new.duration_seconds !== undefined ? payload.new.duration_seconds : payload.new.durationSeconds,
+              status: payload.new.status,
+              winner_id: payload.new.winner_id || payload.new.winnerId,
+              sets: payload.new.sets || [],
+              sub_matches: payload.new.sub_matches || payload.new.subMatches || [],
+              round_name: payload.new.round_name || payload.new.roundName,
+              is_adhoc: payload.new.is_adhoc !== undefined ? payload.new.is_adhoc : (payload.new.isAdhoc !== undefined ? payload.new.isAdhoc : payload.new.adhoc),
+              adhoc_type: payload.new.adhoc_type || payload.new.adhocType || payload.new.adhoc_type,
+              max_viewers: payload.new.max_viewers !== undefined ? payload.new.max_viewers : (payload.new.maxViewers !== undefined ? payload.new.maxViewers : 0),
+              sport: payload.new.sport || 'badminton',
+              sport_metadata: payload.new.sport_metadata || payload.new.sportMetadata || {},
+            };
+
+            setMatches(prev => prev.map(m => m.id === updatedMatch.id ? (updatedMatch as Match) : m));
+          }
+        )
+        .subscribe();
+    }
+
+    return () => {
+      clearInterval(syncInterval);
+      if (channel) {
+        console.log(`🔌 Umpire disconnecting real-time updates for match: ${selectedMatchId}`);
+        supabase.removeChannel(channel);
+      }
+    };
+  }, [selectedMatchId]);
+
+  // Cascading Selection & Search States
+  const [selectedSportFilter, setSelectedSportFilter] = useState<string>(activeSport || 'all');
+  const [selectedTournamentFilter, setSelectedTournamentFilter] = useState<string>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
+  useEffect(() => {
+    if (activeSport) setSelectedSportFilter(activeSport);
+  }, [activeSport]);
+
   const umpireMatches = matches.filter(
-    m => (m.status === 'running' || m.status === 'scheduled') && m.umpire_id === user?.id
+    m => (m.status === 'running' || m.status === 'paused' || m.status === 'scheduled') && 
+         m.umpire_id === user?.id
   );
-  const availableMatches = umpireMatches.length > 0
+  const baseMatches = umpireMatches.length > 0
     ? umpireMatches
-    : matches.filter(m => m.status === 'running' || m.status === 'scheduled');
+    : matches.filter(m => m.status === 'running' || m.status === 'paused' || m.status === 'scheduled');
+
+  // Filtered by Sport
+  const sportFilteredMatches = baseMatches.filter(m => {
+    if (selectedSportFilter === 'all') return true;
+    const tour = tournaments.find(t => t.id === m.tournament_id);
+    const mSport = m.sport || tour?.sport || 'badminton';
+    return mSport === selectedSportFilter;
+  });
+
+  // Filtered by Tournament
+  const tournamentFilteredMatches = sportFilteredMatches.filter(m => {
+    if (selectedTournamentFilter === 'all') return true;
+    return m.tournament_id === selectedTournamentFilter;
+  });
+
+  // Filtered by Search Query (matchId, tournament name, team / player name, court)
+  const availableMatches = tournamentFilteredMatches.filter(m => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase().trim();
+    const tour = tournaments.find(t => t.id === m.tournament_id);
+    const tourName = tour?.name?.toLowerCase() || '';
+    const matchId = (m.id || '').toLowerCase();
+    const p1 = (m.player1_name || '').toLowerCase();
+    const p2 = (m.player2_name || '').toLowerCase();
+    const court = (m.court || '').toLowerCase();
+    const round = (m.round_name || '').toLowerCase();
+
+    return matchId.includes(q) || tourName.includes(q) || p1.includes(q) || p2.includes(q) || court.includes(q) || round.includes(q);
+  });
+
+  // Active tournaments for the selected sport
+  const availableTournaments = tournaments.filter(t => {
+    if (selectedSportFilter === 'all') return true;
+    return t.sport === selectedSportFilter;
+  });
+
+  const handleSportChange = (sport: string) => {
+    setSelectedSportFilter(sport);
+    setSelectedTournamentFilter('all');
+    
+    // Immediately pick the first available match for the newly selected sport
+    const newSportMatches = baseMatches.filter(m => {
+      if (sport === 'all') return true;
+      const tour = tournaments.find(t => t.id === m.tournament_id);
+      const mSport = m.sport || tour?.sport || 'badminton';
+      return mSport === sport;
+    });
+    if (newSportMatches.length > 0) {
+      setSelectedMatchId(newSportMatches[0].id);
+    } else {
+      setSelectedMatchId(null);
+    }
+  };
+
+  const handleTournamentChange = (tourId: string) => {
+    setSelectedTournamentFilter(tourId);
+    
+    const newTourMatches = sportFilteredMatches.filter(m => {
+      if (tourId === 'all') return true;
+      return m.tournament_id === tourId;
+    });
+    if (newTourMatches.length > 0) {
+      setSelectedMatchId(newTourMatches[0].id);
+    } else {
+      setSelectedMatchId(null);
+    }
+  };
+
+  // Auto-select match if current selection is invalid or filtered out
+  useEffect(() => {
+    if (availableMatches.length > 0) {
+      const matchStillAvailable = availableMatches.some(m => m.id === selectedMatchId);
+      if (!matchStillAvailable) {
+        setSelectedMatchId(availableMatches[0].id);
+      }
+    } else {
+      setSelectedMatchId(null);
+    }
+  }, [availableMatches, selectedMatchId]);
 
   const match = matches.find(m => m.id === selectedMatchId);
 
@@ -88,59 +278,238 @@ export default function ScoringPage() {
     );
   }
 
-  if (!match) {
-    return (
-      <div>
-        <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 16 }}>Live Scoring</h1>
-        <div className="empty-state">
-          <div className="empty-state-icon">🏸</div>
-          <p style={{ fontSize: 16, fontWeight: 500 }}>No matches assigned to you</p>
-          <p style={{ fontSize: 14 }}>Ask the admin to assign you as umpire for a match</p>
-        </div>
-      </div>
-    );
-  }
-
-  const matchEvent = events.find(e => e.id === match.event_id);
-  const matchTournament = tournaments.find(t => t.id === match.tournament_id);
+  const matchEvent = match ? events.find(e => e.id === match.event_id) : undefined;
+  const matchTournament = match ? tournaments.find(t => t.id === match.tournament_id) : undefined;
 
   return (
     <div>
-      <div style={{ marginBottom: 20 }}>
-        <h1 style={{ fontSize: 28, fontWeight: 700 }}>Live Scoring</h1>
-        <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 4 }}>
-          {umpireMatches.length > 0 ? 'Your assigned matches' : 'Select a match and start scoring'}
-        </p>
-      </div>
-
-      {/* Match selector */}
-      <div style={{ marginBottom: 24 }}>
-        <select
-          className="input"
-          style={{ width: 'auto', minWidth: 300 }}
-          value={selectedMatchId || ''}
-          onChange={e => setSelectedMatchId(e.target.value)}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
+        <div>
+          <h1 style={{ fontSize: 28, fontWeight: 700 }}>Live Scoring</h1>
+          <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 4 }}>
+            {umpireMatches.length > 0 ? 'Your assigned matches (or pick any scheduled match)' : 'Select tournament, match, or search directly'}
+          </p>
+        </div>
+        <button
+          className="btn btn-primary"
+          onClick={() => setShowAdHocModal(true)}
+          style={{ display: 'flex', alignItems: 'center', gap: 6 }}
         >
-          {availableMatches.map(m => (
-            <option key={m.id} value={m.id}>
-              {m.player1_name} vs {m.player2_name} ({m.court || 'No court'})
-            </option>
-          ))}
-        </select>
+          ⚡ New Ad-hoc Match
+        </button>
       </div>
 
-      <ScoringInterface
-        key={selectedMatchId}
-        match={match}
-        event={matchEvent}
-        tournament={matchTournament}
-        onScoreUpdated={async () => {
-          const freshMatches = await getMatches();
-          setMatches(freshMatches);
+      {showAdHocModal && (
+        <AdHocMatchModal
+          onClose={() => setShowAdHocModal(false)}
+          umpire={user}
+        />
+      )}
+
+      {/* Step-by-Step Cascading Match Selector & Direct Omnibox Search Bar */}
+      <div
+        className="glass-card"
+        style={{
+          padding: '16px 20px',
+          marginBottom: 24,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 14,
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-lg)',
+          boxShadow: 'var(--glass-shadow)',
         }}
-      />
+      >
+        {/* Top Filter Row: Step 1 Sport -> Step 2 Tournament -> Step 3 Match */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 12, alignItems: 'flex-end' }}>
+          
+          {/* Step 1: Sport Selector */}
+          <div>
+            <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              1️⃣ Sport
+            </label>
+            <select
+              className="input"
+              style={{ width: '100%', height: 38, fontSize: 13, background: 'var(--bg-secondary)' }}
+              value={selectedSportFilter}
+              onChange={e => handleSportChange(e.target.value)}
+            >
+              <option value="all">🌐 All Sports</option>
+              <option value="volleyball">🏐 Volleyball</option>
+              <option value="badminton">🏸 Badminton</option>
+              <option value="table_tennis">🏓 Table Tennis</option>
+              <option value="squash">🎾 Squash</option>
+              <option value="tennis">🥎 Tennis</option>
+            </select>
+          </div>
+
+          {/* Step 2: Active Tournament Selector */}
+          <div>
+            <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              2️⃣ Tournament (Active)
+            </label>
+            <select
+              className="input"
+              style={{ width: '100%', height: 38, fontSize: 13, background: 'var(--bg-secondary)' }}
+              value={selectedTournamentFilter}
+              onChange={e => handleTournamentChange(e.target.value)}
+            >
+              <option value="all">🏆 All Active Tournaments ({availableTournaments.length})</option>
+              {availableTournaments.map(t => (
+                <option key={t.id} value={t.id}>
+                  {t.name} ({t.status.toUpperCase()})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Step 3: Match Selection */}
+          <div>
+            <label style={{ display: 'block', fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              3️⃣ Match ({availableMatches.length} available)
+            </label>
+            <select
+              className="input"
+              style={{ width: '100%', height: 38, fontSize: 13, background: 'var(--bg-secondary)', fontWeight: 600 }}
+              value={match?.id || ''}
+              onChange={e => setSelectedMatchId(e.target.value)}
+            >
+              {availableMatches.length === 0 ? (
+                <option value="">No matching fixtures</option>
+              ) : (
+                availableMatches.map(m => (
+                  <option key={m.id} value={m.id}>
+                    {m.player1_name} vs {m.player2_name} [{m.court || 'Court'}] ({m.status.toUpperCase()})
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+        </div>
+
+        {/* Free-Text Omnibox Search Filter */}
+        <div style={{ position: 'relative', width: '100%' }}>
+          <input
+            type="text"
+            className="input"
+            placeholder="🔍 Direct type: Match ID (e.g. m_vb_live_final), Tournament, Team / Player name, or Court..."
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            style={{
+              width: '100%',
+              height: 38,
+              fontSize: 13,
+              paddingLeft: 12,
+              paddingRight: searchQuery ? 32 : 12,
+              background: 'var(--bg-primary)',
+              border: '1px solid var(--border-accent)',
+            }}
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              style={{
+                position: 'absolute',
+                right: 10,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                fontSize: 14,
+              }}
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
+
+      {!match ? (
+        <div className="empty-state">
+          <div className="empty-state-icon">🔎</div>
+          <p style={{ fontSize: 16, fontWeight: 500 }}>No match found matching your search</p>
+          <p style={{ fontSize: 14, color: 'var(--text-muted)' }}>Try clearing your filters or search keywords above.</p>
+          <button
+            className="btn btn-secondary btn-sm"
+            style={{ marginTop: 12 }}
+            onClick={() => {
+              setSelectedSportFilter('all');
+              setSelectedTournamentFilter('all');
+              setSearchQuery('');
+            }}
+          >
+            Reset Filters
+          </button>
+        </div>
+      ) : match.sport === 'table_tennis' ? (
+        <TableTennisScoring
+          key={selectedMatchId}
+          match={match}
+          event={matchEvent}
+          tournament={matchTournament}
+          onScoreUpdated={async () => {
+            const freshMatches = await getMatches();
+            setMatches(freshMatches);
+          }}
+        />
+      ) : match.sport === 'squash' ? (
+        <SquashScoring
+          key={selectedMatchId}
+          match={match}
+          event={matchEvent}
+          tournament={matchTournament}
+          onScoreUpdated={async () => {
+            const freshMatches = await getMatches();
+            setMatches(freshMatches);
+          }}
+        />
+      ) : match.sport === 'tennis' ? (
+        <TennisScoring
+          key={selectedMatchId}
+          match={match}
+          event={matchEvent}
+          tournament={matchTournament}
+          onScoreUpdated={async () => {
+            const freshMatches = await getMatches();
+            setMatches(freshMatches);
+          }}
+        />
+      ) : match.sport === 'volleyball' ? (
+        <VolleyballScoring
+          key={selectedMatchId}
+          match={match}
+          event={matchEvent}
+          tournament={matchTournament}
+          onScoreUpdated={async () => {
+            const freshMatches = await getMatches();
+            setMatches(freshMatches);
+          }}
+        />
+      ) : (
+        <ScoringInterface
+
+          key={selectedMatchId}
+          match={match}
+          event={matchEvent}
+          tournament={matchTournament}
+          onScoreUpdated={async () => {
+            const freshMatches = await getMatches();
+            setMatches(freshMatches);
+          }}
+        />
+      )}
     </div>
   );
+}
+
+function getIndividualPlayers(name: string): string[] {
+  if (!name) return ['TBD'];
+  const parts = name.split(/\s*(?:\/|\+|,|and)\s*/i);
+  if (parts.length > 1) return parts.map(p => p.trim());
+  return [name.trim()];
 }
 
 function ScoringInterface({
@@ -154,11 +523,19 @@ function ScoringInterface({
   tournament?: Tournament;
   onScoreUpdated: () => void;
 }) {
-  const scoringFormat = event?.scoring_format || '21-point';
-  const scoringConfig = SCORING_CONFIGS[scoringFormat];
+  const { user } = useAuth();
+  const defaultScoringFormat = event?.scoring_format || '21-point';
+  const defaultScoringConfig = SCORING_CONFIGS[defaultScoringFormat];
+
+  // Core Game Configurations and overrides
+  const [targetPoints, setTargetPoints] = useState(defaultScoringConfig.maxPoints);
+  const [maxCapPoints, setMaxCapPoints] = useState(defaultScoringConfig.absoluteMax);
+  const [bestOfGames, setBestOfGames] = useState(match.is_adhoc ? 1 : 3);
+  const [selectedCourt, setSelectedCourt] = useState(match.court || 'Court 1');
+  const [showMediaModal, setShowMediaModal] = useState(false);
 
   // Team configurations
-  const isTeamMatch = tournament?.type === 'team' || !!match.sub_matches;
+  const isTeamMatch = tournament?.type === 'team' && Array.isArray(match.sub_matches) && match.sub_matches.length > 0;
   const [teams, setTeams] = useState<Team[]>([]);
   const [allPlayers, setAllPlayers] = useState<User[]>([]);
   const [activeSubMatchIdx, setActiveSubMatchIdx] = useState<number | null>(null);
@@ -166,17 +543,133 @@ function ScoringInterface({
   const [overallWinnerId, setOverallWinnerId] = useState<string | null>(match.winner_id || null);
   const [overallStatus, setOverallStatus] = useState<MatchStatus>(match.status);
 
-  // Timers and states for standard match (reused inside sub-match)
-  const [isPaused, setIsPaused] = useState(false);
+  // Scorer States
   const [matchStarted, setMatchStarted] = useState(match.status === 'running');
+  const [isPaused, setIsPaused] = useState(false);
   const [matchElapsed, setMatchElapsed] = useState(0);
   const [totalPausedTime, setTotalPausedTime] = useState(0);
+  const [pauseElapsed, setPauseElapsed] = useState(0);
+
+  // BWF Serving and court side layouts
+  const [servingTeam, setServingTeam] = useState<'player1' | 'player2'>('player1');
+  const [courtSides, setCourtSides] = useState<{ left: 'player1' | 'player2'; right: 'player1' | 'player2' }>({
+    left: 'player1',
+    right: 'player2',
+  });
+
+  // Keep a ref in sync with servingTeam so the wrapper always has the latest value
+  const servingTeamRef = useRef(servingTeam);
+  useEffect(() => { servingTeamRef.current = servingTeam; }, [servingTeam]);
+
+  // Wrapper for updateMatchScore to automatically inject badminton specific metadata (like serve indicator)
+  const updateMatchScore = async (
+    matchId: string,
+    sets: any[],
+    status: any,
+    winnerId?: string | null,
+    actualStartTime?: string | null,
+    actualEndTime?: string | null,
+    court?: string | null,
+    subMatches?: any,
+    durationSeconds?: number | null,
+    sport?: string | null,
+    sportMetadata?: any | null
+  ) => {
+    const meta = {
+      ...(sportMetadata || {}),
+      serving_team: sportMetadata?.serving_team || servingTeamRef.current
+    };
+    return originalUpdateMatchScore(
+      matchId,
+      sets,
+      status,
+      winnerId,
+      actualStartTime,
+      actualEndTime,
+      court,
+      subMatches,
+      durationSeconds,
+      'badminton',
+      meta
+    );
+  };
+
+  const isDoubles = match.player1_name.includes('/') || match.player1_name.includes('+') || match.player1_name.includes(',') || (event?.category || '').endsWith('D');
+  const p1Names = getIndividualPlayers(match.player1_name);
+  const p2Names = getIndividualPlayers(match.player2_name);
+
+  // For singles: both positions use the same player name (no "Partner")
+  const [t1Positions, setT1Positions] = useState({ left: isDoubles ? (p1Names[1] || p1Names[0]) : p1Names[0], right: p1Names[0] });
+  const [t2Positions, setT2Positions] = useState({ left: p2Names[0], right: isDoubles ? (p2Names[1] || p2Names[0]) : p2Names[0] });
+
+  // History and progression tracker
+  const [pointsHistory, setPointsHistory] = useState<{ p1Score: number; p2Score: number; scorer: 'player1' | 'player2'; setNumber: number; elapsedSec: number }[]>([]);
+  const [lastScored, setLastScored] = useState<'player1' | 'player2' | null>(null);
+
+  // Operational Settings
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [vibrateEnabled, setVibrateEnabled] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [declareWinnerOpen, setDeclareWinnerOpen] = useState(false);
+  const [earlyConcludeReason, setEarlyConcludeReason] = useState<string>('Retirement / Medical Injury');
+  const [customEarlyConcludeReason, setCustomEarlyConcludeReason] = useState<string>('');
+  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [isScoringFullscreen, setIsScoringFullscreen] = useState(false);
+  const scorecardRef = useRef<HTMLDivElement | null>(null);
+
+  const toggleFullscreen = useCallback(() => {
+    const container = scorecardRef.current;
+    if (!container) return;
+
+    if (!document.fullscreenElement) {
+      container.requestFullscreen().then(() => {
+        setIsScoringFullscreen(true);
+        if (screen.orientation && (screen.orientation as any).lock) {
+          (screen.orientation as any).lock('landscape').catch((err: any) => {
+            console.log('Orientation lock failed:', err);
+          });
+        }
+      }).catch(err => {
+        console.error('Fullscreen request failed:', err);
+        setIsScoringFullscreen(true);
+      });
+    } else {
+      document.exitFullscreen().then(() => {
+        setIsScoringFullscreen(false);
+      }).catch(err => {
+        console.error('Exit fullscreen failed:', err);
+        setIsScoringFullscreen(false);
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      const isFull = !!document.fullscreenElement;
+      setIsScoringFullscreen(isFull);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, []);
+
+  // Game Intervals (60s mid-game & 120s set-end)
+  const [intervalActive, setIntervalActive] = useState(false);
+  const [intervalType, setIntervalType] = useState<'mid-game' | 'game-end'>('mid-game');
+  const [intervalTimeLeft, setIntervalTimeLeft] = useState(60);
+  const [gameWinnerSummary, setGameWinnerSummary] = useState('');
+  const [midGameIntervalTriggered, setMidGameIntervalTriggered] = useState<boolean[]>( [false, false, false, false, false] );
+
+  const matchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pauseTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const intervalTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (isTeamMatch) {
       async function loadRosters() {
         try {
-          const teamList = await getTeamsByTournament(match.tournament_id);
+          const teamList = await getTeamsByTournament(match.tournament_id!);
           const playerList = await getPlayers();
           setTeams(teamList);
           setAllPlayers(playerList);
@@ -190,15 +683,763 @@ function ScoringInterface({
 
   const team1 = teams.find(t => t.id === match.player1_id);
   const team2 = teams.find(t => t.id === match.player2_id);
-
   const team1Roster = allPlayers.filter(p => team1?.players.includes(p.id));
   const team2Roster = allPlayers.filter(p => team2?.players.includes(p.id));
 
-  // Overall sub-match scorer trigger
+  // Synthesize Web Audio beeps
+  const playScoreBeep = () => {
+    if (!soundEnabled || typeof window === 'undefined') return;
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+      
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // High-pitched A5 beep
+      gainNode.gain.setValueAtTime(0.08, audioCtx.currentTime);
+      
+      oscillator.start();
+      gainNode.gain.exponentialRampToValueAtTime(0.005, audioCtx.currentTime + 0.12);
+      oscillator.stop(audioCtx.currentTime + 0.12);
+    } catch (e) {
+      console.warn("Audio Context blocked:", e);
+    }
+  };
+
+  const triggerVibration = () => {
+    if (vibrateEnabled && typeof window !== 'undefined' && navigator.vibrate) {
+      navigator.vibrate(80);
+    }
+  };
+
+  // State initialization for scoring BWF
+  const [state, setState] = useState<ScoreState>(() => {
+    if (match.sets.length > 0) {
+      const p1Wins = match.sets.filter(s => s.winner_id === match.player1_id).length;
+      const p2Wins = match.sets.filter(s => s.winner_id === match.player2_id).length;
+      return {
+        sets: [...match.sets],
+        currentSet: match.sets.length - 1,
+        isMatchComplete: match.status === 'completed',
+        matchWinnerId: match.winner_id || null,
+        player1SetsWon: p1Wins,
+        player2SetsWon: p2Wins,
+      };
+    }
+    return createInitialScoreState();
+  });
+
+  const currentSet = state.sets[state.currentSet];
+
+  // Match setup start
+  const handleStartMatch = async () => {
+    setMatchStarted(true);
+    setIsPaused(false);
+    try {
+      await updateMatchScore(
+        match.id,
+        state.sets,
+        'running',
+        null,
+        new Date().toISOString(),
+        null,
+        selectedCourt,
+        isTeamMatch ? subMatches : undefined
+      );
+      onScoreUpdated();
+      playScoreBeep();
+
+      // Audit log: Match Started
+      await logAction(
+        'Match Started',
+        'match',
+        `Match: ${match.player1_name} vs ${match.player2_name} | Court: ${selectedCourt} | Format: ${targetPoints}-point (Best of ${bestOfGames}) | Umpire: ${match.umpire_name || 'N/A'}`,
+        user ? { id: user.id, name: user.name } : null
+      );
+    } catch (err) {
+      console.error('Failed to start match:', err);
+    }
+  };
+
+  // Timers and intervals control
+  useEffect(() => {
+    if (matchStarted && !isPaused && !state.isMatchComplete && !intervalActive) {
+      matchTimerRef.current = setInterval(() => {
+        setMatchElapsed(prev => prev + 1);
+      }, 1000);
+    }
+    return () => {
+      if (matchTimerRef.current) clearInterval(matchTimerRef.current);
+    };
+  }, [matchStarted, isPaused, state.isMatchComplete, intervalActive]);
+
+  useEffect(() => {
+    if (isPaused) {
+      setPauseElapsed(0);
+      pauseTimerRef.current = setInterval(() => {
+        setPauseElapsed(prev => prev + 1);
+      }, 1000);
+    } else {
+      if (pauseTimerRef.current) {
+        clearInterval(pauseTimerRef.current);
+        setTotalPausedTime(prev => prev + pauseElapsed);
+        setPauseElapsed(0);
+      }
+    }
+    return () => {
+      if (pauseTimerRef.current) clearInterval(pauseTimerRef.current);
+    };
+  }, [isPaused, pauseElapsed]);
+
+  // Interval timer countdown
+  useEffect(() => {
+    if (intervalActive && intervalTimeLeft > 0) {
+      intervalTimerRef.current = setInterval(() => {
+        setIntervalTimeLeft(prev => {
+          if (prev <= 1) {
+            clearInterval(intervalTimerRef.current!);
+            setIntervalActive(false);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (intervalTimerRef.current) clearInterval(intervalTimerRef.current);
+    };
+  }, [intervalActive, intervalTimeLeft]);
+
+  // BWF completion and deuce checks
+  const handleScore = useCallback(async (player: 'player1' | 'player2') => {
+    if (isPaused || state.isMatchComplete || intervalActive) return;
+
+    triggerVibration();
+    playScoreBeep();
+
+    setLastScored(player);
+    
+    // Position swaps on server side wins
+    if (isDoubles) {
+      if (player === servingTeam) {
+        // Serving team wins point: swap server partners side position
+        if (player === 'player1') {
+          setT1Positions(prev => ({ left: prev.right, right: prev.left }));
+        } else {
+          setT2Positions(prev => ({ left: prev.right, right: prev.left }));
+        }
+      } else {
+        // Receiving team wins point: switch serve side, partners stay
+        setServingTeam(player);
+        servingTeamRef.current = player;
+      }
+    } else {
+      setServingTeam(player);
+      servingTeamRef.current = player;
+    }
+
+    let nextState: ScoreState = { ...state };
+    const currentSets = [...state.sets];
+    let setIdx = state.currentSet;
+
+    // Safety: if setIdx is out of bounds or the current set is already complete, create a new set
+    if (setIdx < 0 || setIdx >= currentSets.length || !currentSets[setIdx] || currentSets[setIdx].is_complete) {
+      currentSets.push({
+        set_number: currentSets.length + 1,
+        player1_score: 0,
+        player2_score: 0,
+        is_complete: false,
+      });
+      setIdx = currentSets.length - 1;
+    }
+
+    const activeSet = { ...currentSets[setIdx] };
+    if (player === 'player1') activeSet.player1_score++;
+    else activeSet.player2_score++;
+
+    const p1 = activeSet.player1_score;
+    const p2 = activeSet.player2_score;
+
+    // Check mid-game 11-point interval
+    if ((p1 === 11 || p2 === 11) && !midGameIntervalTriggered[setIdx]) {
+      const nextTrigger = [...midGameIntervalTriggered];
+      nextTrigger[setIdx] = true;
+      setMidGameIntervalTriggered(nextTrigger);
+      
+      setIntervalType('mid-game');
+      setIntervalTimeLeft(60);
+      setIntervalActive(true);
+    }
+
+    let setComplete = false;
+    let setWinner: string | undefined = undefined;
+
+    if (p1 >= targetPoints || p2 >= targetPoints) {
+      const diff = Math.abs(p1 - p2);
+      if (diff >= 2 || p1 === maxCapPoints || p2 === maxCapPoints) {
+        setComplete = true;
+        setWinner = p1 > p2 ? match.player1_id : match.player2_id;
+      }
+    }
+
+    activeSet.is_complete = setComplete;
+    activeSet.winner_id = setWinner;
+    currentSets[setIdx] = activeSet;
+
+    // Calculate sets won
+    const p1Wins = currentSets.filter(s => s.winner_id === match.player1_id).length;
+    const p2Wins = currentSets.filter(s => s.winner_id === match.player2_id).length;
+    const targetWins = Math.ceil(bestOfGames / 2);
+
+    let matchComplete = false;
+    let matchWinner: string | null = null;
+
+    if (p1Wins >= targetWins) {
+      matchComplete = true;
+      matchWinner = match.player1_id;
+    } else if (p2Wins >= targetWins) {
+      matchComplete = true;
+      matchWinner = match.player2_id;
+    }
+
+    nextState = {
+      sets: currentSets,
+      currentSet: setComplete && !matchComplete ? setIdx + 1 : setIdx,
+      isMatchComplete: matchComplete,
+      matchWinnerId: matchWinner,
+      player1SetsWon: p1Wins,
+      player2SetsWon: p2Wins,
+    };
+
+    setState(nextState);
+    
+    // Save points history for graphs
+    setPointsHistory(prev => [...prev, { p1Score: p1, p2Score: p2, scorer: player, setNumber: activeSet.set_number, elapsedSec: Math.max(0, matchElapsed - totalPausedTime) }]);
+
+    // Trigger set completion interval
+    if (setComplete && !matchComplete) {
+      const setWinnerName = p1 > p2 ? match.player1_name : match.player2_name;
+      setGameWinnerSummary(
+        `Set ${activeSet.set_number} won by ${setWinnerName} (${p1} - ${p2})`
+      );
+      setIntervalType('game-end');
+      setIntervalTimeLeft(120);
+      setIntervalActive(true);
+
+      // Auto side swap visual guideline
+      setCourtSides(prev => ({ left: prev.right, right: prev.left }));
+
+      // Audit log: Game/Set Won
+      logAction(
+        'Game Set Won',
+        'match',
+        `Game ${activeSet.set_number}: ${match.player1_name} ${p1} - ${p2} ${match.player2_name} | Winner: ${setWinnerName}`,
+        user ? { id: user.id, name: user.name } : null
+      ).catch(() => {});
+    }
+
+    try {
+      const finalStatus = matchComplete ? 'completed' : 'running';
+      await updateMatchScore(
+        match.id,
+        currentSets,
+        finalStatus as any,
+        matchWinner,
+        match.actual_start_time || new Date().toISOString(),
+        matchComplete ? new Date().toISOString() : null,
+        selectedCourt
+      );
+      onScoreUpdated();
+
+      // Audit log + Match History: Match Completed
+      if (matchComplete && matchWinner) {
+        const winnerName = matchWinner === match.player1_id ? match.player1_name : match.player2_name;
+        const setsStr = currentSets.filter(s => s.is_complete).map(s => `${s.player1_score}-${s.player2_score}`).join(', ');
+        const currentPlayTime = matchElapsed - totalPausedTime;
+
+        await logAction(
+          'Match Completed',
+          'match',
+          `Match: ${match.player1_name} vs ${match.player2_name} | Winner: ${winnerName} | Sets: ${p1Wins}-${p2Wins} (${setsStr}) | Duration: ${formatTime(currentPlayTime)} | Court: ${selectedCourt}`,
+          user ? { id: user.id, name: user.name } : null
+        );
+
+        // Save detailed match history
+        const historyData: MatchHistoryData = {
+          id: `mh-${match.id}-${Date.now()}`,
+          match_id: match.id,
+          tournament_id: match.tournament_id,
+          event_id: match.event_id,
+          umpire_id: match.umpire_id,
+          umpire_name: match.umpire_name,
+          player1_name: match.player1_name,
+          player2_name: match.player2_name,
+          scoring_format: `${targetPoints}-point`,
+          best_of_games: bestOfGames,
+          court: selectedCourt,
+          points_history: pointsHistory.map((ph, idx) => ({
+            point: idx + 1,
+            scorer: ph.scorer,
+            p1_score: ph.p1Score,
+            p2_score: ph.p2Score,
+            set: ph.setNumber || 1,
+            server: servingTeam,
+            timestamp_sec: ph.elapsedSec || 0,
+          })),
+          sets_snapshot: currentSets,
+          total_duration_seconds: matchElapsed,
+          play_time_seconds: currentPlayTime,
+          paused_time_seconds: totalPausedTime,
+          started_at: match.actual_start_time || new Date().toISOString(),
+          ended_at: new Date().toISOString(),
+          winner_id: matchWinner,
+          winner_name: winnerName,
+          final_status: 'completed',
+        };
+        saveMatchHistory(historyData).catch(err => console.error('Failed to save match history:', err));
+      }
+    } catch (err) {
+      console.error('Failed to save score:', err);
+    }
+  }, [state, servingTeam, isPaused, intervalActive, isDoubles, targetPoints, maxCapPoints, bestOfGames, match, midGameIntervalTriggered, selectedCourt, onScoreUpdated]);
+
+  const handleUndo = useCallback(async () => {
+    if (state.sets.length === 0 || intervalActive) return;
+
+    const currentSets = [...state.sets];
+    const setIdx = state.currentSet;
+
+    // Guard: if setIdx is out of bounds, clamp it
+    if (setIdx < 0 || setIdx >= currentSets.length) {
+      // Nothing to undo — state is inconsistent, just return
+      return;
+    }
+
+    const activeSet = { ...currentSets[setIdx] };
+
+    // Guard: if we're at 0-0 in the first set, there's nothing to undo
+    if (activeSet.player1_score === 0 && activeSet.player2_score === 0 && setIdx === 0) {
+      return;
+    }
+
+    playScoreBeep();
+
+    if (activeSet.is_complete) {
+      activeSet.is_complete = false;
+      activeSet.winner_id = undefined;
+    }
+
+    if (activeSet.player1_score === 0 && activeSet.player2_score === 0 && setIdx > 0) {
+      currentSets.pop();
+      const prevSetIdx = setIdx - 1;
+      const prevSet = { ...currentSets[prevSetIdx] };
+      prevSet.is_complete = false;
+      prevSet.winner_id = undefined;
+      currentSets[prevSetIdx] = prevSet;
+      
+      setState(prev => ({
+        ...prev,
+        sets: currentSets,
+        currentSet: prevSetIdx,
+        isMatchComplete: false,
+        matchWinnerId: null,
+        player1SetsWon: currentSets.filter(s => s.winner_id === match.player1_id).length,
+        player2SetsWon: currentSets.filter(s => s.winner_id === match.player2_id).length,
+      }));
+    } else {
+      if (lastScored === 'player1' && activeSet.player1_score > 0) {
+        activeSet.player1_score--;
+      } else if (lastScored === 'player2' && activeSet.player2_score > 0) {
+        activeSet.player2_score--;
+      } else {
+        if (activeSet.player1_score > activeSet.player2_score) activeSet.player1_score--;
+        else if (activeSet.player2_score > 0) activeSet.player2_score--;
+        else if (activeSet.player1_score > 0) activeSet.player1_score--;
+      }
+      currentSets[setIdx] = activeSet;
+
+      setState(prev => ({
+        ...prev,
+        sets: currentSets,
+        isMatchComplete: false,
+        matchWinnerId: null,
+        player1SetsWon: currentSets.filter(s => s.winner_id === match.player1_id).length,
+        player2SetsWon: currentSets.filter(s => s.winner_id === match.player2_id).length,
+      }));
+    }
+
+    setLastScored(null);
+    setPointsHistory(prev => prev.slice(0, -1));
+
+    try {
+      await updateMatchScore(
+        match.id,
+        currentSets,
+        'running',
+        null,
+        match.actual_start_time,
+        null,
+        selectedCourt
+      );
+      onScoreUpdated();
+    } catch (err) {
+      console.error('Failed to undo point:', err);
+    }
+  }, [state, intervalActive, lastScored, match, selectedCourt, onScoreUpdated]);
+
+  const handleReset = useCallback(async () => {
+    if (!window.confirm("Are you sure you want to reset this scorer scoreboard?")) return;
+
+    const initialState = createInitialScoreState();
+    setState(initialState);
+    setIsPaused(false);
+    setLastScored(null);
+    setMatchStarted(false);
+    setMatchElapsed(0);
+    setPauseElapsed(0);
+    setTotalPausedTime(0);
+    setPointsHistory([]);
+    setMidGameIntervalTriggered([false, false, false, false, false]);
+
+    try {
+      await updateMatchScore(match.id, initialState.sets, 'scheduled', null, null, null, selectedCourt);
+      onScoreUpdated();
+
+      // Audit log: Score Reset
+      await logAction(
+        'Match Score Reset',
+        'match',
+        `Match: ${match.player1_name} vs ${match.player2_name} | Scoreboard reset by umpire`,
+        user ? { id: user.id, name: user.name } : null
+      );
+    } catch (err) {
+      console.error('Failed to reset match score:', err);
+    }
+  }, [match, selectedCourt, onScoreUpdated, user]);
+
+  const handleDeclareWinner = useCallback(async (winnerId: string, reason?: string) => {
+    const currentSets = [...state.sets];
+    const currentPlayTime = matchElapsed - totalPausedTime;
+    const winnerName = winnerId === match.player1_id ? match.player1_name : match.player2_name;
+    const setIdx = state.currentSet;
+
+    // Complete the active set if not completed
+    if (setIdx >= 0 && setIdx < currentSets.length) {
+      const activeSet = { ...currentSets[setIdx] };
+      activeSet.is_complete = true;
+      activeSet.winner_id = winnerId;
+      currentSets[setIdx] = activeSet;
+    }
+
+    const p1Wins = currentSets.filter(s => s.winner_id === match.player1_id).length;
+    const p2Wins = currentSets.filter(s => s.winner_id === match.player2_id).length;
+
+    const nextState: ScoreState = {
+      sets: currentSets,
+      currentSet: setIdx,
+      isMatchComplete: true,
+      matchWinnerId: winnerId,
+      player1SetsWon: p1Wins,
+      player2SetsWon: p2Wins,
+    };
+    
+    setState(nextState);
+
+    try {
+      await updateMatchScore(
+        match.id,
+        currentSets,
+        'completed',
+        winnerId,
+        match.actual_start_time || new Date().toISOString(),
+        new Date().toISOString(),
+        selectedCourt,
+        undefined,
+        undefined,
+        match.sport || 'badminton',
+        {
+          ...(match.sport_metadata || {}),
+          early_conclude_reason: reason || undefined
+        }
+      );
+      onScoreUpdated();
+
+      // Audit log: Match Completed early
+      const reasonText = reason ? ` | Early Conclude Reason: ${reason}` : '';
+      await logAction(
+        'Match Completed',
+        'match',
+        `Match: ${match.player1_name} vs ${match.player2_name} | Ended early by umpire | Winner: ${winnerName} | Sets: ${p1Wins}-${p2Wins}${reasonText} | Duration: ${formatTime(currentPlayTime)} | Court: ${selectedCourt}`,
+        user ? { id: user.id, name: user.name } : null
+      );
+
+      // Save detailed match history
+      const historyData: MatchHistoryData = {
+        id: `mh-${match.id}-${Date.now()}`,
+        match_id: match.id,
+        tournament_id: match.tournament_id,
+        event_id: match.event_id,
+        umpire_id: match.umpire_id,
+        umpire_name: match.umpire_name,
+        player1_name: match.player1_name,
+        player2_name: match.player2_name,
+        scoring_format: `${targetPoints}-point`,
+        best_of_games: bestOfGames,
+        court: selectedCourt,
+        points_history: pointsHistory.map((ph, idx) => ({
+          point: idx + 1,
+          scorer: ph.scorer,
+          p1_score: ph.p1Score,
+          p2_score: ph.p2Score,
+          set: ph.setNumber || 1,
+          server: servingTeam,
+          timestamp_sec: ph.elapsedSec || 0,
+        })),
+        sets_snapshot: currentSets,
+        total_duration_seconds: matchElapsed,
+        play_time_seconds: currentPlayTime,
+        paused_time_seconds: totalPausedTime,
+        started_at: match.actual_start_time || new Date().toISOString(),
+        ended_at: new Date().toISOString(),
+        winner_id: winnerId,
+        winner_name: winnerName,
+        final_status: 'completed',
+      };
+      saveMatchHistory(historyData).catch(err => console.error('Failed to save match history:', err));
+    } catch (err) {
+      console.error('Failed to declare winner early:', err);
+    }
+  }, [state, matchElapsed, totalPausedTime, match, selectedCourt, onScoreUpdated, user, targetPoints, bestOfGames, pointsHistory, servingTeam]);
+
+  const handleDownloadScoreSheetPdf = useCallback(() => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert('Pop-up blocked! Please allow pop-ups to export the scoresheet.');
+      return;
+    }
+
+    const winnerName = state.matchWinnerId
+      ? (state.matchWinnerId === match.player1_id ? match.player1_name : match.player2_name)
+      : 'TBD';
+
+    // Group points history by set/game
+    const pointsBySet = pointsHistory.reduce((acc, ph) => {
+      const s = ph.setNumber || 1;
+      if (!acc[s]) acc[s] = [];
+      acc[s].push(ph);
+      return acc;
+    }, {} as Record<number, typeof pointsHistory>);
+
+    // Generate columns or tables for each game
+    const gamesHtml = state.sets.map((set) => {
+      const setPts = pointsBySet[set.set_number] || [];
+      const rows = setPts.map((ph, idx) => {
+        const isP1Scored = ph.scorer === 'player1';
+        const indicator1 = isP1Scored ? '✓' : '';
+        const indicator2 = !isP1Scored ? '✓' : '';
+        
+        return `
+          <tr>
+            <td style="text-align: center; color: #64748b;">${idx + 1}</td>
+            <td style="text-align: center; font-weight: ${isP1Scored ? 'bold' : 'normal'}; color: ${isP1Scored ? '#2563eb' : '#1e293b'}">${indicator1}</td>
+            <td style="text-align: center; font-weight: 700; font-family: monospace; font-size: 14px; background-color: #f8fafc;">
+              ${ph.p1Score} - ${ph.p2Score}
+            </td>
+            <td style="text-align: center; font-weight: ${!isP1Scored ? 'bold' : 'normal'}; color: ${!isP1Scored ? '#2563eb' : '#1e293b'}">${indicator2}</td>
+          </tr>
+        `;
+      }).join('');
+
+      return `
+        <div style="flex: 1; min-width: 200px; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 8px; background: #ffffff; page-break-inside: avoid;">
+          <h3 style="margin-top: 0; font-size: 16px; border-bottom: 2px solid #2563eb; padding-bottom: 6px; color: #0f172a; text-align: center;">
+            Game ${set.set_number} Score Sheet (${set.player1_score} - ${set.player2_score})
+          </h3>
+          <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
+            <thead>
+              <tr style="background-color: #f1f5f9; border-bottom: 1px solid #cbd5e1;">
+                <th style="width: 50px; text-align: center; padding: 6px; font-size: 10px; text-transform: uppercase;">Pt</th>
+                <th style="text-align: center; padding: 6px; font-size: 10px; text-transform: uppercase; color: #334155;">${match.player1_name.split(' ')[0]}</th>
+                <th style="width: 80px; text-align: center; padding: 6px; font-size: 10px; text-transform: uppercase;">Score</th>
+                <th style="text-align: center; padding: 6px; font-size: 10px; text-transform: uppercase; color: #334155;">${match.player2_name.split(' ')[0]}</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.length > 0 ? rows : '<tr><td colspan="4" style="text-align: center; padding: 12px; color: #94a3b8;">No points recorded</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }).join('');
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>${tournament?.name || 'MatchPoint'} - Score Sheet</title>
+          <style>
+            @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap');
+            body {
+              font-family: 'Outfit', sans-serif;
+              color: #1e293b;
+              background-color: #ffffff;
+              margin: 0;
+              padding: 30px;
+            }
+            .header {
+              text-align: center;
+              border-bottom: 3px double #cbd5e1;
+              padding-bottom: 20px;
+              margin-bottom: 20px;
+            }
+            .header h1 {
+              font-size: 24px;
+              font-weight: 700;
+              margin: 0 0 4px 0;
+              color: #0f172a;
+              text-transform: uppercase;
+            }
+            .header h2 {
+              font-size: 16px;
+              font-weight: 600;
+              margin: 0;
+              color: #2563eb;
+            }
+            .meta-grid {
+              display: grid;
+              grid-template-columns: repeat(5, 1fr);
+              gap: 12px;
+              margin-bottom: 24px;
+              font-size: 13px;
+              background-color: #f8fafc;
+              padding: 12px 16px;
+              border-radius: 8px;
+              border: 1px solid #e2e8f0;
+            }
+            .meta-item strong {
+              color: #475569;
+              display: block;
+              margin-bottom: 2px;
+            }
+            .meta-item span {
+              font-weight: 600;
+              color: #0f172a;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+            }
+            th, td {
+              border-bottom: 1px solid #e2e8f0;
+              padding: 6px 8px;
+              font-size: 12px;
+            }
+            th {
+              color: #475569;
+              font-weight: 600;
+            }
+            .footer {
+              margin-top: 40px;
+              display: flex;
+              justify-content: space-between;
+              padding-top: 20px;
+              border-top: 1px solid #cbd5e1;
+              page-break-inside: avoid;
+            }
+            .sig-block {
+              text-align: center;
+              width: 180px;
+            }
+            .sig-line {
+              border-top: 1px solid #94a3b8;
+              margin-top: 30px;
+              padding-top: 6px;
+              font-size: 11px;
+              color: #64748b;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1>MatchPoint Official Score Sheet</h1>
+            <h2>${tournament?.name || 'Tournament Matches'}</h2>
+          </div>
+
+          <div class="meta-grid">
+            <div class="meta-item">
+              <strong>Competitors</strong>
+              <span>${match.player1_name} vs ${match.player2_name}</span>
+            </div>
+            <div class="meta-item">
+              <strong>Event / Court</strong>
+              <span>${event?.event_name || 'Category'} · ${selectedCourt}</span>
+            </div>
+            <div class="meta-item">
+              <strong>Duration</strong>
+              <span>⏱ ${formatTime(matchElapsed - totalPausedTime)}</span>
+            </div>
+            <div class="meta-item">
+              <strong>Winner</strong>
+              <span style="color: #22c55e;">${winnerName}</span>
+            </div>
+            <div class="meta-item">
+              <strong>Peak Audience</strong>
+              <span>👥 ${match.max_viewers || 0} viewers</span>
+            </div>
+          </div>
+
+          <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 16px;">
+            ${gamesHtml}
+          </div>
+
+          <div class="footer">
+            <div class="sig-block">
+              <div class="sig-line">Umpire Signature (${match.umpire_name || 'Official'})</div>
+            </div>
+            <div class="sig-block">
+              <div class="sig-line">Match Director Signature</div>
+            </div>
+          </div>
+
+          <script>
+            window.onload = function() {
+              window.print();
+            };
+          </script>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+  }, [match, event, selectedCourt, pointsHistory, state, matchElapsed, totalPausedTime]);
+
+  // Determine diagonal serving direction visually
+  const isServerScoreEven = currentSet ? (servingTeam === 'player1' ? currentSet.player1_score : currentSet.player2_score) % 2 === 0 : true;
+
+  // Swapping visual controls
+  const handleSwitchSides = () => {
+    setCourtSides(prev => ({ left: prev.right, right: prev.left }));
+    playScoreBeep();
+  };
+
+  const handleSwapPartners = (team: 'player1' | 'player2') => {
+    if (team === 'player1') {
+      setT1Positions(prev => ({ left: prev.right, right: prev.left }));
+    } else {
+      setT2Positions(prev => ({ left: prev.right, right: prev.left }));
+    }
+    playScoreBeep();
+  };
+
+  // Sub-Tie Matchboard scorers trigger
   const handleScoreSubMatch = useCallback(async (subIdx: number, player: 'player1' | 'player2') => {
     if (!subMatches) return;
     const subMatch = subMatches[subIdx];
     if (subMatch.status === 'completed') return;
+
+    triggerVibration();
+    playScoreBeep();
 
     const currentSets = [...subMatch.sets];
     let setIdx = currentSets.length - 1;
@@ -216,18 +1457,15 @@ function ScoringInterface({
     if (player === 'player1') activeSet.player1_score++;
     else activeSet.player2_score++;
 
-    // BWF set completion rules
-    const pointsToWin = scoringConfig.maxPoints;
-    const goldenPoint = scoringConfig.absoluteMax;
     const p1 = activeSet.player1_score;
     const p2 = activeSet.player2_score;
 
     let isComplete = false;
     let setWinner: string | undefined = undefined;
 
-    if (p1 >= pointsToWin || p2 >= pointsToWin) {
+    if (p1 >= targetPoints || p2 >= targetPoints) {
       const diff = Math.abs(p1 - p2);
-      if (diff >= 2 || p1 === goldenPoint || p2 === goldenPoint) {
+      if (diff >= 2 || p1 === maxCapPoints || p2 === maxCapPoints) {
         isComplete = true;
         setWinner = p1 > p2 ? match.player1_id : match.player2_id;
       }
@@ -241,25 +1479,23 @@ function ScoringInterface({
     const margin = tournament?.bonus_point_margin || 5;
     if (isComplete && Math.abs(p1 - p2) >= margin) {
       const winnerName = p1 > p2 ? match.player1_name : match.player2_name;
-      alert(`💥 Margin Cleared! ${winnerName} wins the set by ${Math.abs(p1 - p2)} pts! Team secures a Bonus Point! 🎉`);
+      alert(`💥 Margin Cleared! ${winnerName} wins by ${Math.abs(p1 - p2)} pts! Team secures a Bonus Point! 🎉`);
     }
 
     const nextSubMatches = [...subMatches];
     const updatedSubMatch = { ...subMatch, sets: currentSets, status: 'running' as MatchStatus };
 
-    // Check if sub-match is complete (best of 3 sets)
     const p1Wins = currentSets.filter(s => s.winner_id === match.player1_id).length;
     const p2Wins = currentSets.filter(s => s.winner_id === match.player2_id).length;
 
-    if (p1Wins >= 2 || p2Wins >= 2) {
+    if (p1Wins >= Math.ceil(bestOfGames / 2) || p2Wins >= Math.ceil(bestOfGames / 2)) {
       updatedSubMatch.status = 'completed';
-      updatedSubMatch.winner_id = p1Wins >= 2 ? match.player1_id : match.player2_id;
+      updatedSubMatch.winner_id = p1Wins >= p2Wins ? match.player1_id : match.player2_id;
     }
 
     nextSubMatches[subIdx] = updatedSubMatch;
     setSubMatches(nextSubMatches);
 
-    // Calculate tie winner
     const totalTies = nextSubMatches.length;
     const needed = Math.ceil(totalTies / 2);
     const team1Wins = nextSubMatches.filter(s => s.status === 'completed' && s.winner_id === match.player1_id).length;
@@ -287,19 +1523,21 @@ function ScoringInterface({
         nextWinnerId,
         match.actual_start_time || new Date().toISOString(),
         nextStatus === 'completed' ? new Date().toISOString() : null,
-        null,
+        selectedCourt,
         nextSubMatches
       );
       onScoreUpdated();
     } catch (err) {
-      console.error('Failed to update sub-match score in database:', err);
+      console.error('Failed to update sub-match score:', err);
     }
-  }, [subMatches, match, scoringConfig, tournament, onScoreUpdated]);
+  }, [subMatches, match, targetPoints, maxCapPoints, bestOfGames, tournament, selectedCourt, onScoreUpdated]);
 
   const handleSubMatchUndo = useCallback(async (subIdx: number) => {
     if (!subMatches) return;
     const subMatch = subMatches[subIdx];
     if (subMatch.sets.length === 0) return;
+
+    playScoreBeep();
 
     const currentSets = [...subMatch.sets];
     const setIdx = currentSets.length - 1;
@@ -313,11 +1551,8 @@ function ScoringInterface({
     if (activeSet.player1_score === 0 && activeSet.player2_score === 0 && currentSets.length > 1) {
       currentSets.pop();
     } else {
-      if (activeSet.player2_score > activeSet.player1_score) {
-        activeSet.player2_score--;
-      } else if (activeSet.player1_score > 0) {
-        activeSet.player1_score--;
-      }
+      if (activeSet.player2_score > activeSet.player1_score) activeSet.player2_score--;
+      else if (activeSet.player1_score > 0) activeSet.player1_score--;
       currentSets[setIdx] = activeSet;
     }
 
@@ -335,14 +1570,99 @@ function ScoringInterface({
         null,
         match.actual_start_time,
         null,
-        null,
+        selectedCourt,
         nextSubMatches
       );
       onScoreUpdated();
     } catch (err) {
       console.error('Failed to undo sub-match score:', err);
     }
-  }, [subMatches, match, onScoreUpdated]);
+  }, [subMatches, match, selectedCourt, onScoreUpdated]);
+
+  const getPlayerOccurrences = useCallback((name: string) => {
+    if (!name || !name.trim()) return 0;
+    let count = 0;
+    subMatches.forEach(s => {
+      s.player1_names.forEach(p => { if (p && p.trim().toLowerCase() === name.trim().toLowerCase()) count++; });
+      s.player2_names.forEach(p => { if (p && p.trim().toLowerCase() === name.trim().toLowerCase()) count++; });
+    });
+    return count;
+  }, [subMatches]);
+
+  const isPlayerInMultipleSingles = useCallback((name: string) => {
+    if (!name || !name.trim()) return false;
+    let singlesCount = 0;
+    subMatches.forEach(s => {
+      const isSingles = !s.event_type.endsWith('D');
+      if (isSingles) {
+        s.player1_names.forEach(p => { if (p && p.trim().toLowerCase() === name.trim().toLowerCase()) singlesCount++; });
+        s.player2_names.forEach(p => { if (p && p.trim().toLowerCase() === name.trim().toLowerCase()) singlesCount++; });
+      }
+    });
+    return singlesCount > 1;
+  }, [subMatches]);
+
+  const handleTrumpToggle = async (subIdx: number, team: 'player1' | 'player2') => {
+    if (!subMatches) return;
+    const nextSubMatches = subMatches.map((s, idx) => {
+      const isTarget = idx === subIdx;
+      if (team === 'player1') {
+        return {
+          ...s,
+          t1_trump: isTarget ? !s.t1_trump : false // reset others
+        };
+      } else {
+        return {
+          ...s,
+          t2_trump: isTarget ? !s.t2_trump : false // reset others
+        };
+      }
+    });
+
+    setSubMatches(nextSubMatches);
+
+    try {
+      await updateMatchScore(
+        match.id,
+        match.sets,
+        match.status,
+        match.winner_id,
+        match.actual_start_time,
+        null,
+        selectedCourt,
+        nextSubMatches
+      );
+      onScoreUpdated();
+    } catch (err) {
+      console.error('Failed to update Trump Match toggle:', err);
+    }
+  };
+
+  const handleSubMatchEventTypeChange = async (subIdx: number, newEventType: string) => {
+    if (!subMatches) return;
+    const nextSubMatches = [...subMatches];
+    nextSubMatches[subIdx] = {
+      ...nextSubMatches[subIdx],
+      event_type: newEventType
+    };
+    setSubMatches(nextSubMatches);
+
+    try {
+      await updateMatchScore(
+        match.id,
+        match.sets,
+        match.status,
+        match.winner_id,
+        match.actual_start_time,
+        null,
+        selectedCourt,
+        nextSubMatches
+      );
+      onScoreUpdated();
+    } catch (err) {
+      console.error('Failed to change sub-match event type:', err);
+    }
+  };
 
   const handleRosterSelect = async (subIdx: number, team: 'player1' | 'player2', slot: number, name: string) => {
     if (!subMatches) return;
@@ -370,7 +1690,7 @@ function ScoringInterface({
         match.winner_id,
         match.actual_start_time,
         null,
-        null,
+        selectedCourt,
         nextSubMatches
       );
       onScoreUpdated();
@@ -379,138 +1699,173 @@ function ScoringInterface({
     }
   };
 
-  // Overall calculations for scoreboard
-  const team1SubWins = subMatches.filter(s => s.status === 'completed' && s.winner_id === match.player1_id).length;
-  const team2SubWins = subMatches.filter(s => s.status === 'completed' && s.winner_id === match.player2_id).length;
+  const playTime = matchElapsed - totalPausedTime;
 
-  // Render sub-scoring panel if selected
-  if (isTeamMatch && activeSubMatchIdx !== null) {
-    const subMatch = subMatches[activeSubMatchIdx];
-    const currentSet = subMatch.sets[subMatch.sets.length - 1];
-    const p1Name = subMatch.player1_names.join(' / ') || `${match.player1_name} Player(s)`;
-    const p2Name = subMatch.player2_names.join(' / ') || `${match.player2_name} Player(s)`;
-    const isSubDeuce = currentSet ? isDeuce(currentSet, scoringConfig) : false;
-    const isSubComplete = subMatch.status === 'completed';
-
+  // 1. Setup screen prior to match starting
+  if (!matchStarted) {
     return (
-      <div style={{ maxWidth: 700, margin: '0 auto' }}>
-        <button
-          className="btn btn-ghost btn-sm"
-          style={{ marginBottom: 16 }}
-          onClick={() => setActiveSubMatchIdx(null)}
-        >
-          <IconArrowLeft size={16} /> Back to Tie Matchboard
-        </button>
+      <div style={{ maxWidth: 640, margin: '0 auto' }} className="glass-card animate-slide-up">
+        <div style={{ padding: 32 }}>
+          <h2 style={{ fontSize: 24, fontWeight: 700, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 10 }}>
+            🏟️ Match Setup Scorer Board
+          </h2>
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 24 }}>
+            Configure and synchronize court configurations before starting game play.
+          </p>
 
-        <div className="glass-card" style={{ padding: 20, marginBottom: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--accent)' }}>
-              🔥 Tie Sub-Match: {subMatch.event_type}
-            </span>
-            <span className="badge badge-accent">
-              {scoringFormat} best of 3
-            </span>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 24 }}>
+            <div className="input-group">
+              <label className="input-label">Court Selection</label>
+              <select className="input" value={selectedCourt} onChange={e => setSelectedCourt(e.target.value)}>
+                <option value="Court 1">Court 1</option>
+                <option value="Court 2">Court 2</option>
+                <option value="Court 3">Court 3</option>
+                <option value="Court 4">Court 4</option>
+              </select>
+            </div>
+
+            <div className="input-group">
+              <label className="input-label">Scoring Format Cap</label>
+              <select
+                className="input"
+                value={targetPoints}
+                onChange={e => {
+                  const pts = parseInt(e.target.value);
+                  setTargetPoints(pts);
+                  setMaxCapPoints(pts === 21 ? 30 : pts === 15 ? 21 : 15);
+                }}
+              >
+                <option value="21">21 Points (Standard BWF)</option>
+                <option value="15">15 Points (Operational Cap)</option>
+                <option value="11">11 Points (Short Game)</option>
+              </select>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'center', gap: 32, marginTop: 12 }}>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Sets Won</div>
-              <div style={{ fontSize: 20, fontWeight: 700 }}>
-                {subMatch.sets.filter(s => s.winner_id === match.player1_id).length}
-              </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 24 }}>
+            <div className="input-group">
+              <label className="input-label">Game Length</label>
+              <select className="input" value={bestOfGames} onChange={e => setBestOfGames(parseInt(e.target.value))}>
+                <option value="3">Best of 3 Sets</option>
+                <option value="1">Single Game Match</option>
+                <option value="5">Best of 5 Sets</option>
+              </select>
             </div>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Sets Won</div>
-              <div style={{ fontSize: 20, fontWeight: 700 }}>
-                {subMatch.sets.filter(s => s.winner_id === match.player2_id).length}
-              </div>
+
+            <div className="input-group">
+              <label className="input-label">Initial Serve Team</label>
+              <select className="input" value={servingTeam} onChange={e => setServingTeam(e.target.value as any)}>
+                <option value="player1">{match.player1_name} (Serve First)</option>
+                <option value="player2">{match.player2_name} (Serve First)</option>
+              </select>
             </div>
           </div>
 
-          {isSubDeuce && !isSubComplete && (
-            <div style={{ textAlign: 'center', background: 'rgba(245,158,11,0.1)', color: 'var(--score-point)', padding: '4px 12px', borderRadius: 20, marginTop: 12, fontSize: 12, fontWeight: 600 }}>
-              ⚡ DEUCE ACTIVE (Absolute limit: {scoringConfig.absoluteMax})
+          {/* Court Position Preview */}
+          <div style={{ marginBottom: 28 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 10, textAlign: 'center' }}>
+              🏟️ Court Preview — Player Positions
             </div>
-          )}
-        </div>
-
-        {/* Scoreboard buttons */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
-          <button
-            className="score-button"
-            onClick={() => handleScoreSubMatch(activeSubMatchIdx, 'player1')}
-            disabled={isSubComplete}
-          >
-            <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 6 }}>{p1Name}</div>
-            <div style={{ fontSize: 64, fontWeight: 800, fontFamily: 'var(--font-mono)' }}>
-              {currentSet?.player1_score ?? 0}
-            </div>
-            {isSubComplete && subMatch.winner_id === match.player1_id && (
-              <div style={{ color: 'var(--score-win)', marginTop: 8 }}>🏆 Winner</div>
-            )}
-          </button>
-
-          <button
-            className="score-button"
-            onClick={() => handleScoreSubMatch(activeSubMatchIdx, 'player2')}
-            disabled={isSubComplete}
-          >
-            <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 6 }}>{p2Name}</div>
-            <div style={{ fontSize: 64, fontWeight: 800, fontFamily: 'var(--font-mono)' }}>
-              {currentSet?.player2_score ?? 0}
-            </div>
-            {isSubComplete && subMatch.winner_id === match.player2_id && (
-              <div style={{ color: 'var(--score-win)', marginTop: 8 }}>🏆 Winner</div>
-            )}
-          </button>
-        </div>
-
-        {/* Action button */}
-        <div style={{ display: 'flex', justifyContent: 'center', gap: 12 }}>
-          <button
-            className="btn btn-secondary"
-            onClick={() => handleSubMatchUndo(activeSubMatchIdx)}
-            disabled={subMatch.sets.length === 0}
-          >
-            <IconUndo size={16} /> Undo Point
-          </button>
-          <button
-            className="btn btn-secondary"
-            onClick={() => setActiveSubMatchIdx(null)}
-          >
-            Return to Dashboard
-          </button>
-        </div>
-
-        {/* Set list */}
-        {subMatch.sets.length > 0 && (
-          <div className="glass-card" style={{ padding: 16, marginTop: 20 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Sets Summary</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {subMatch.sets.map((set, setIdx) => (
-                <div key={setIdx} style={{ padding: '8px 12px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', minWidth: 70, textAlign: 'center' }}>
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Set {set.set_number}</div>
-                  <div style={{ fontSize: 14, fontWeight: 700, fontFamily: 'var(--font-mono)', marginTop: 2 }}>
-                    {set.player1_score} - {set.player2_score}
+            <div style={{
+              background: '#008751', border: '3px solid rgba(255,255,255,0.85)', borderRadius: 8,
+              display: 'grid', gridTemplateColumns: '1fr 4px 1fr',
+              height: isDoubles ? 140 : 100, position: 'relative', overflow: 'hidden',
+            }}>
+              {/* Left Court */}
+              <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: isDoubles ? 8 : 0, padding: 8 }}>
+                {isDoubles ? (
+                  <>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', textAlign: 'center', padding: '4px 8px', background: 'rgba(255,255,255,0.15)', borderRadius: 4, textShadow: '0 1px 3px rgba(0,0,0,0.5)' }}>
+                      {courtSides.left === 'player1' ? t1Positions.left : t2Positions.left}
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', textAlign: 'center', padding: '4px 8px', background: 'rgba(255,255,255,0.15)', borderRadius: 4, textShadow: '0 1px 3px rgba(0,0,0,0.5)' }}>
+                      {courtSides.left === 'player1' ? t1Positions.right : t2Positions.right}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', textAlign: 'center', textShadow: '0 1px 3px rgba(0,0,0,0.5)' }}>
+                    {courtSides.left === 'player1' ? match.player1_name : match.player2_name}
                   </div>
-                </div>
-              ))}
+                )}
+              </div>
+              {/* Net */}
+              <div style={{
+                backgroundImage: 'linear-gradient(to bottom, rgba(255,255,255,0.85) 50%, transparent 50%)',
+                backgroundSize: '4px 8px',
+                backgroundRepeat: 'repeat-y',
+              }} />
+              {/* Right Court */}
+              <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: isDoubles ? 8 : 0, padding: 8 }}>
+                {isDoubles ? (
+                  <>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', textAlign: 'center', padding: '4px 8px', background: 'rgba(255,255,255,0.15)', borderRadius: 4, textShadow: '0 1px 3px rgba(0,0,0,0.5)' }}>
+                      {courtSides.right === 'player1' ? t1Positions.right : t2Positions.right}
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#fff', textAlign: 'center', padding: '4px 8px', background: 'rgba(255,255,255,0.15)', borderRadius: 4, textShadow: '0 1px 3px rgba(0,0,0,0.5)' }}>
+                      {courtSides.right === 'player1' ? t1Positions.left : t2Positions.left}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#fff', textAlign: 'center', textShadow: '0 1px 3px rgba(0,0,0,0.5)' }}>
+                    {courtSides.right === 'player1' ? match.player1_name : match.player2_name}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'center', marginTop: 10 }}>
+              <button className="btn btn-secondary btn-sm" onClick={handleSwitchSides} style={{ fontSize: 11 }}>
+                🔄 Swap Court Sides
+              </button>
+              {isDoubles && (
+                <>
+                  <button className="btn btn-secondary btn-sm" onClick={() => handleSwapPartners('player1')} style={{ fontSize: 11, marginLeft: 8 }}>👥 Swap {p1Names[0].split(' ')[0]}</button>
+                  <button className="btn btn-secondary btn-sm" onClick={() => handleSwapPartners('player2')} style={{ fontSize: 11, marginLeft: 8 }}>👥 Swap {p2Names[0].split(' ')[0]}</button>
+                </>
+              )}
             </div>
           </div>
-        )}
+
+          <button className="btn btn-primary btn-lg" style={{ width: '100%', padding: '14px 20px', fontSize: 16, fontWeight: 700 }} onClick={handleStartMatch}>
+            <IconPlay size={18} /> Start Match & Timer
+          </button>
+        </div>
       </div>
     );
   }
 
   // Render Sub-Tie Matchboard view for team matches
-  if (isTeamMatch) {
+  if (isTeamMatch && activeSubMatchIdx === null) {
     const isOverallComplete = overallStatus === 'completed';
+    const team1SubWins = subMatches.filter(s => s.status === 'completed' && s.winner_id === match.player1_id).length;
+    const team2SubWins = subMatches.filter(s => s.status === 'completed' && s.winner_id === match.player2_id).length;
+
     return (
-      <div style={{ maxWidth: 740, margin: '0 auto' }}>
+      <div style={{ maxWidth: 740, margin: '0 auto' }} className="animate-slide-up">
         <div className="glass-card" style={{ padding: 24, marginBottom: 24, border: isOverallComplete ? '1px solid rgba(168,85,247,0.3)' : undefined }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)' }}>📍 COURT: {match.court || 'Court TBD'}</span>
-            <span className={`badge badge-${overallStatus}`}>{overallStatus}</span>
+            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)' }}>📍 COURT: {selectedCourt}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => setShowMediaModal(true)}
+                style={{
+                  background: 'rgba(239, 68, 68, 0.15)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  color: '#F87171',
+                  borderRadius: '6px',
+                  padding: '4px 10px',
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                📺 YouTube / Media
+              </button>
+              <span className={`badge badge-${overallStatus}`}>{overallStatus}</span>
+            </div>
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 20, margin: '12px 0' }}>
@@ -546,23 +1901,88 @@ function ScoringInterface({
           {subMatches.map((sub, sIdx) => {
             const isSubComplete = sub.status === 'completed';
             const isSubRunning = sub.status === 'running';
-            const isDoubles = sub.event_type.endsWith('D');
-            const slots = isDoubles ? [0, 1] : [0];
+            const isSubDoubles = sub.event_type.endsWith('D');
+            const slots = isSubDoubles ? [0, 1] : [0];
+
+            // Check constraints
+            let hasRosterViolation = false;
+            let hasSinglesViolation = false;
+            let offendingPlayers: string[] = [];
+
+            const allNames = [...sub.player1_names, ...sub.player2_names].filter(Boolean);
+            allNames.forEach(name => {
+              if (getPlayerOccurrences(name) > 2) {
+                hasRosterViolation = true;
+                offendingPlayers.push(name);
+              }
+              if (isPlayerInMultipleSingles(name)) {
+                hasSinglesViolation = true;
+                offendingPlayers.push(name);
+              }
+            });
+
+            const hasTrump = sub.t1_trump || sub.t2_trump;
+            let cardBorder = isSubRunning ? '1px solid var(--accent)' : undefined;
+            let cardBoxShadow = undefined;
+            if (hasTrump) {
+              cardBorder = '1px solid rgba(245, 158, 11, 0.6)';
+              cardBoxShadow = '0 0 15px rgba(245, 158, 11, 0.2)';
+            }
 
             return (
-              <div key={sub.id} className="glass-card" style={{ padding: 20, border: isSubRunning ? '1px solid var(--accent)' : undefined }}>
+              <div key={sub.id} className="glass-card" style={{ padding: 20, border: cardBorder, boxShadow: cardBoxShadow }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span className="badge badge-accent" style={{ fontWeight: 700 }}>{sub.event_type}</span>
+                    {!isSubRunning && !isSubComplete ? (
+                      <select
+                        className="input"
+                        style={{ height: 26, fontSize: 11, padding: '0 6px', width: 'auto', background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}
+                        value={sub.event_type}
+                        onChange={e => handleSubMatchEventTypeChange(sIdx, e.target.value)}
+                      >
+                        {(tournament?.team_tie_events || ['MS', 'MD', 'XD']).map(evt => (
+                          <option key={evt} value={evt}>{evt}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="badge badge-accent" style={{ fontWeight: 700 }}>{sub.event_type}</span>
+                    )}
+
                     <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
                       {sub.event_type === 'MS' ? "Men's Singles" :
                        sub.event_type === 'MD' ? "Men's Doubles" :
                        sub.event_type === 'WS' ? "Women's Singles" :
                        sub.event_type === 'WD' ? "Women's Doubles" : "Mixed Doubles"}
                     </span>
+                    {sub.t1_trump && <span className="badge" style={{ background: '#f59e0b', color: '#000', fontWeight: 700, fontSize: 10, borderRadius: 'var(--radius-sm)' }}>🃏 T1 TRUMP</span>}
+                    {sub.t2_trump && <span className="badge" style={{ background: '#f59e0b', color: '#000', fontWeight: 700, fontSize: 10, borderRadius: 'var(--radius-sm)' }}>🃏 T2 TRUMP</span>}
                   </div>
                   <span className={`badge badge-${sub.status}`}>{sub.status}</span>
                 </div>
+
+                {/* Validation errors */}
+                {(hasRosterViolation || hasSinglesViolation) && (
+                  <div style={{
+                    marginBottom: 12,
+                    background: 'rgba(239, 68, 68, 0.08)',
+                    border: '1px solid rgba(239, 68, 68, 0.2)',
+                    borderRadius: 'var(--radius-sm)',
+                    padding: '8px 12px',
+                    fontSize: 11,
+                    fontWeight: 500,
+                    color: 'var(--score-loss)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 4
+                  }}>
+                    {hasRosterViolation && (
+                      <div>⚠️ Max 2 Matches limit violated for: <strong>{[...new Set(offendingPlayers.filter(name => getPlayerOccurrences(name) > 2))].join(', ')}</strong></div>
+                    )}
+                    {hasSinglesViolation && (
+                      <div>⚠️ Player assigned to multiple Singles matches: <strong>{[...new Set(offendingPlayers.filter(name => isPlayerInMultipleSingles(name)))].join(', ')}</strong></div>
+                    )}
+                  </div>
+                )}
 
                 {/* Rosters Selection */}
                 {!isOverallComplete && !isSubComplete && (
@@ -571,18 +1991,22 @@ function ScoringInterface({
                       <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>{match.player1_name} Roster Selection</div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {slots.map(slot => (
-                          <select
-                            key={slot}
-                            className="input"
-                            style={{ height: 32, fontSize: 12, padding: '0 8px' }}
-                            value={sub.player1_names[slot] || ''}
-                            onChange={e => handleRosterSelect(sIdx, 'player1', slot, e.target.value)}
-                          >
-                            <option value="">Select Player {slot + 1}</option>
-                            {team1Roster.map(p => (
-                              <option key={p.id} value={p.name}>{p.name}</option>
-                            ))}
-                          </select>
+                          <div key={slot} style={{ display: 'flex', gap: 4 }}>
+                            <input
+                              type="text"
+                              className="input"
+                              style={{ height: 32, fontSize: 12, padding: '0 8px', flex: 1 }}
+                              placeholder={`Type Player ${slot + 1} name...`}
+                              value={sub.player1_names[slot] || ''}
+                              onChange={e => handleRosterSelect(sIdx, 'player1', slot, e.target.value)}
+                              list={`players-list-1-${sIdx}-${slot}`}
+                            />
+                            <datalist id={`players-list-1-${sIdx}-${slot}`}>
+                              {team1Roster.map(p => (
+                                <option key={p.id} value={p.name} />
+                              ))}
+                            </datalist>
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -590,18 +2014,22 @@ function ScoringInterface({
                       <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>{match.player2_name} Roster Selection</div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                         {slots.map(slot => (
-                          <select
-                            key={slot}
-                            className="input"
-                            style={{ height: 32, fontSize: 12, padding: '0 8px' }}
-                            value={sub.player2_names[slot] || ''}
-                            onChange={e => handleRosterSelect(sIdx, 'player2', slot, e.target.value)}
-                          >
-                            <option value="">Select Player {slot + 1}</option>
-                            {team2Roster.map(p => (
-                              <option key={p.id} value={p.name}>{p.name}</option>
-                            ))}
-                          </select>
+                          <div key={slot} style={{ display: 'flex', gap: 4 }}>
+                            <input
+                              type="text"
+                              className="input"
+                              style={{ height: 32, fontSize: 12, padding: '0 8px', flex: 1 }}
+                              placeholder={`Type Player ${slot + 1} name...`}
+                              value={sub.player2_names[slot] || ''}
+                              onChange={e => handleRosterSelect(sIdx, 'player2', slot, e.target.value)}
+                              list={`players-list-2-${sIdx}-${slot}`}
+                            />
+                            <datalist id={`players-list-2-${sIdx}-${slot}`}>
+                              {team2Roster.map(p => (
+                                <option key={p.id} value={p.name} />
+                              ))}
+                            </datalist>
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -634,12 +2062,51 @@ function ScoringInterface({
                   </div>
                 </div>
 
+                {/* Optional Trump Match Selector */}
+                {!isOverallComplete && !isSubComplete && (
+                  <div style={{ display: 'flex', gap: 12, marginTop: 14, borderTop: '1px solid var(--border)', paddingTop: 12, alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 }}>🃏 Optional Trump Selectors:</span>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        style={{
+                          fontSize: 10,
+                          padding: '2px 8px',
+                          border: sub.t1_trump ? 'none' : '1px solid rgba(255, 255, 255, 0.1)',
+                          background: sub.t1_trump ? 'linear-gradient(135deg, #f59e0b, #d97706)' : 'transparent',
+                          color: sub.t1_trump ? '#000' : 'var(--text-secondary)',
+                          fontWeight: 700,
+                        }}
+                        onClick={() => handleTrumpToggle(sIdx, 'player1')}
+                      >
+                        {sub.t1_trump ? '🃏 T1 Trump' : '🃏 Select T1 Trump'}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        style={{
+                          fontSize: 10,
+                          padding: '2px 8px',
+                          border: sub.t2_trump ? 'none' : '1px solid rgba(255, 255, 255, 0.1)',
+                          background: sub.t2_trump ? 'linear-gradient(135deg, #f59e0b, #d97706)' : 'transparent',
+                          color: sub.t2_trump ? '#000' : 'var(--text-secondary)',
+                          fontWeight: 700,
+                        }}
+                        onClick={() => handleTrumpToggle(sIdx, 'player2')}
+                      >
+                        {sub.t2_trump ? '🃏 T2 Trump' : '🃏 Select T2 Trump'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {!isOverallComplete && (
                   <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
                     <button
                       className="btn btn-primary btn-sm"
                       onClick={() => setActiveSubMatchIdx(sIdx)}
-                      disabled={sub.player1_names.length === 0 || sub.player2_names.length === 0}
+                      disabled={sub.player1_names.length === 0 || sub.player2_names.length === 0 || hasRosterViolation}
                     >
                       {isSubComplete ? "Edit Score" : isSubRunning ? "Resume Scoring" : "Start Scoring"}
                     </button>
@@ -649,478 +2116,1649 @@ function ScoringInterface({
             );
           })}
         </div>
+
+        {/* Media Modal for Team Tie */}
+        {showMediaModal && (
+          <MatchMediaModal match={match} onClose={() => setShowMediaModal(false)} />
+        )}
       </div>
     );
   }
 
-  // Standard Scorer Interface
-  const [state, setState] = useState<ScoreState>(() => {
-    if (match.sets.length > 0) {
-      const p1Wins = match.sets.filter(s => s.winner_id === match.player1_id).length;
-      const p2Wins = match.sets.filter(s => s.winner_id === match.player2_id).length;
-      return {
-        sets: [...match.sets],
-        currentSet: match.sets.length - 1,
-        isMatchComplete: match.status === 'completed',
-        matchWinnerId: match.winner_id || null,
-        player1SetsWon: p1Wins,
-        player2SetsWon: p2Wins,
-      };
-    }
-    return createInitialScoreState();
-  });
+  // Render Sub-Match view for active sub match scoring
+  if (isTeamMatch && activeSubMatchIdx !== null) {
+    const subMatch = subMatches[activeSubMatchIdx];
+    const currentSubSet = subMatch.sets[subMatch.sets.length - 1];
+    const p1Name = subMatch.player1_names.join(' / ') || `${match.player1_name} Player(s)`;
+    const p2Name = subMatch.player2_names.join(' / ') || `${match.player2_name} Player(s)`;
+    const isSubDeuce = currentSubSet ? isDeuce(currentSubSet, { maxPoints: targetPoints, absoluteMax: maxCapPoints } as any) : false;
+    const isSubComplete = subMatch.status === 'completed';
 
-  const [lastScored, setLastScored] = useState<'player1' | 'player2' | null>(null);
-  const matchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pauseTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [pauseElapsed, setPauseElapsed] = useState(0);
+    return (
+      <div style={{ maxWidth: 700, margin: '0 auto' }} className="animate-slide-up">
+        <button className="btn btn-ghost btn-sm" style={{ marginBottom: 16 }} onClick={() => setActiveSubMatchIdx(null)}>
+          <IconArrowLeft size={16} /> Back to Tie Matchboard
+        </button>
 
-  useEffect(() => {
-    if (matchStarted && !isPaused && !state.isMatchComplete) {
-      matchTimerRef.current = setInterval(() => {
-        setMatchElapsed(prev => prev + 1);
-      }, 1000);
-    }
-    return () => {
-      if (matchTimerRef.current) clearInterval(matchTimerRef.current);
-    };
-  }, [matchStarted, isPaused, state.isMatchComplete]);
+        <div className="glass-card" style={{ padding: 20, marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--accent)' }}>🔥 Sub-Match: {subMatch.event_type}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => setShowMediaModal(true)}
+                style={{
+                  background: 'rgba(239, 68, 68, 0.15)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  color: '#F87171',
+                  borderRadius: '6px',
+                  padding: '3px 8px',
+                  fontSize: '11px',
+                  fontWeight: '700',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                }}
+              >
+                📺 Media
+              </button>
+              <span className="badge badge-accent">{targetPoints}-Pt Game</span>
+            </div>
+          </div>
 
-  useEffect(() => {
-    if (isPaused) {
-      setPauseElapsed(0);
-      pauseTimerRef.current = setInterval(() => {
-        setPauseElapsed(prev => prev + 1);
-      }, 1000);
-    } else {
-      if (pauseTimerRef.current) {
-        clearInterval(pauseTimerRef.current);
-        setTotalPausedTime(prev => prev + pauseElapsed);
-        setPauseElapsed(0);
-      }
-    }
-    return () => {
-      if (pauseTimerRef.current) clearInterval(pauseTimerRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPaused]);
+          <div style={{ display: 'flex', justifyContent: 'center', gap: 32, marginTop: 12 }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Sets Won</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>
+                {subMatch.sets.filter(s => s.winner_id === match.player1_id).length}
+              </div>
+            </div>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Sets Won</div>
+              <div style={{ fontSize: 20, fontWeight: 700 }}>
+                {subMatch.sets.filter(s => s.winner_id === match.player2_id).length}
+              </div>
+            </div>
+          </div>
 
-  const currentSet = state.sets[state.currentSet];
-  const isDeuceState = currentSet ? isDeuce(currentSet, scoringConfig) : false;
-  const gamePointPlayer = currentSet ? getGamePoint(currentSet, match.player1_id, match.player2_id, scoringConfig) : null;
+          {isSubDeuce && !isSubComplete && (
+            <div style={{ textAlign: 'center', background: 'rgba(245,158,11,0.1)', color: 'var(--score-point)', padding: '4px 12px', borderRadius: 20, marginTop: 12, fontSize: 12, fontWeight: 600 }}>
+              ⚡ DEUCE ACTIVE (Limit: {maxCapPoints})
+            </div>
+          )}
+        </div>
 
-  const handleScore = useCallback((player: 'player1' | 'player2') => {
-    if (isPaused || state.isMatchComplete) return;
+        {/* Scoring Buttons */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
+          <button className="score-button" onClick={() => handleScoreSubMatch(activeSubMatchIdx, 'player1')} disabled={isSubComplete}>
+            <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 6 }}>{p1Name}</div>
+            <div style={{ fontSize: 64, fontWeight: 800, fontFamily: 'var(--font-mono)' }}>{currentSubSet?.player1_score ?? 0}</div>
+            {isSubComplete && subMatch.winner_id === match.player1_id && <div style={{ color: 'var(--score-win)', marginTop: 8 }}>🏆 Winner</div>}
+          </button>
 
-    if (!matchStarted) {
-      setMatchStarted(true);
-    }
+          <button className="score-button" onClick={() => handleScoreSubMatch(activeSubMatchIdx, 'player2')} disabled={isSubComplete}>
+            <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 6 }}>{p2Name}</div>
+            <div style={{ fontSize: 64, fontWeight: 800, fontFamily: 'var(--font-mono)' }}>{currentSubSet?.player2_score ?? 0}</div>
+            {isSubComplete && subMatch.winner_id === match.player2_id && <div style={{ color: 'var(--score-win)', marginTop: 8 }}>🏆 Winner</div>}
+          </button>
+        </div>
 
-    setLastScored(player);
-    let nextState: ScoreState | null = null;
-    setState(prev => {
-      nextState = addPoint(prev, player, match.player1_id, match.player2_id, scoringConfig);
-      return nextState;
-    });
+        {/* Action button */}
+        <div style={{ display: 'flex', justifyContent: 'center', gap: 12 }}>
+          <button className="btn btn-secondary" onClick={() => handleSubMatchUndo(activeSubMatchIdx)} disabled={subMatch.sets.length === 0}>
+            <IconUndo size={16} /> Undo Point
+          </button>
+          <button className="btn btn-secondary" onClick={() => setActiveSubMatchIdx(null)}>Return to Dashboard</button>
+        </div>
 
-    setTimeout(async () => {
-      if (nextState) {
-        try {
-          const finalStatus = nextState.isMatchComplete ? 'completed' : 'running';
-          await updateMatchScore(
-            match.id,
-            nextState.sets,
-            finalStatus as any,
-            nextState.matchWinnerId,
-            match.actual_start_time || new Date().toISOString(),
-            nextState.isMatchComplete ? new Date().toISOString() : null,
-            null
-          );
-          onScoreUpdated();
-        } catch (err) {
-          console.error('Failed to update match score in database:', err);
-        }
-      }
-    }, 0);
-  }, [isPaused, state.isMatchComplete, match, matchStarted, scoringConfig, onScoreUpdated]);
+        {/* Set list */}
+        {subMatch.sets.length > 0 && (
+          <div className="glass-card" style={{ padding: 16, marginTop: 20 }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Sets Summary</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {subMatch.sets.map((set, setIdx) => (
+                <div key={setIdx} style={{ padding: '8px 12px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', minWidth: 70, textAlign: 'center' }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Set {set.set_number}</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, fontFamily: 'var(--font-mono)', marginTop: 2 }}>
+                    {set.player1_score} - {set.player2_score}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
-  const handleUndo = useCallback(() => {
-    let nextState: ScoreState | null = null;
-    setState(prev => {
-      nextState = undoPoint(prev);
-      return nextState;
-    });
-    setLastScored(null);
+        {/* Media Modal for Sub-Match */}
+        {showMediaModal && (
+          <MatchMediaModal match={match} onClose={() => setShowMediaModal(false)} />
+        )}
+      </div>
+    );
+  }
 
-    setTimeout(async () => {
-      if (nextState) {
-        try {
-          const finalStatus = nextState.isMatchComplete ? 'completed' : 'running';
-          await updateMatchScore(
-            match.id,
-            nextState.sets,
-            finalStatus as any,
-            nextState.matchWinnerId,
-            match.actual_start_time,
-            null,
-            null
-          );
-          onScoreUpdated();
-        } catch (err) {
-          console.error('Failed to undo match score in database:', err);
-        }
-      }
-    }, 0);
-  }, [match, onScoreUpdated]);
+  // BWF Game point calculations
+  const gamePointPlayer = currentSet ? getGamePoint(currentSet, match.player1_id, match.player2_id, { maxPoints: targetPoints } as any) : null;
+  const isDeuceActive = currentSet ? isDeuce(currentSet, { maxPoints: targetPoints, absoluteMax: maxCapPoints } as any) : false;
 
-  const handleReset = useCallback(async () => {
-    const initialState = createInitialScoreState();
-    setState(initialState);
-    setIsPaused(false);
-    setLastScored(null);
-    setMatchStarted(false);
-    setMatchElapsed(0);
-    setPauseElapsed(0);
-    setTotalPausedTime(0);
-
-    try {
-      await updateMatchScore(match.id, initialState.sets, 'scheduled', null, null, null, null);
-      onScoreUpdated();
-    } catch (err) {
-      console.error('Failed to reset match score in database:', err);
-    }
-  }, [match, onScoreUpdated]);
-
-  const playTime = matchElapsed - totalPausedTime;
+  // Helper: computed scores for left/right court sides
+  const leftScore = courtSides.left === 'player1' ? (currentSet?.player1_score ?? 0) : (currentSet?.player2_score ?? 0);
+  const rightScore = courtSides.right === 'player1' ? (currentSet?.player1_score ?? 0) : (currentSet?.player2_score ?? 0);
+  const currentSetNumber = currentSet?.set_number ?? 1;
 
   return (
-    <div style={{ maxWidth: 700, margin: '0 auto' }}>
-      {/* Match Info Header */}
-      <div className="glass-card" style={{
-        padding: 20,
-        marginBottom: 20,
-        border: state.isMatchComplete ? '1px solid rgba(168, 85, 247, 0.3)' : undefined,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{match.court || 'Court TBD'}</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="badge badge-accent" style={{
-              background: 'var(--accent-subtle)',
-              borderColor: 'var(--accent)',
-              color: 'var(--accent)',
-              fontWeight: 600,
-            }}>
-              {scoringFormat === '11-point' ? '11-Pt BWF (Golden 15)' :
-               scoringFormat === '15-point' ? '15-Pt Classic (Golden 21)' :
-               '21-Pt BWF (Golden 30)'}
-            </span>
-            {state.isMatchComplete ? (
-              <span className="badge badge-completed">Match Complete</span>
-            ) : isPaused ? (
-              <span className="badge badge-pending">Paused</span>
-            ) : matchStarted ? (
-              <span className="badge badge-live">
-                <span className="live-dot" style={{ width: 5, height: 5 }} /> Live
-              </span>
-            ) : (
-              <span className="badge badge-open">Ready</span>
-            )}
-            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-              Set {state.currentSet + 1} of {state.sets.length > 2 ? 3 : 'Best of 3'}
-            </span>
-          </div>
-        </div>
+    <div 
+      ref={scorecardRef}
+      className={`animate-slide-up ${isScoringFullscreen ? 'fullscreen-scorecard' : ''}`}
+      style={{
+        maxWidth: isScoringFullscreen ? 'none' : 600,
+        margin: isScoringFullscreen ? '0' : '0 auto',
+        background: 'var(--bg-card)', 
+        padding: isScoringFullscreen ? '16px' : '12px',
+        borderRadius: isScoringFullscreen ? '0' : 'var(--radius-lg)',
+        border: isScoringFullscreen ? 'none' : '1px solid var(--border)',
+        boxShadow: 'var(--glass-shadow)',
+        color: 'var(--text-primary)',
+      } as React.CSSProperties}
+    >
+      {/* ═══════════ GLOBAL PRINT MEDIA OVERRIDES ═══════════ */}
+      <style dangerouslySetInnerHTML={{__html: `
+        /* Fullscreen layout styling */
+        .fullscreen-scorecard {
+          position: fixed !important;
+          top: 0 !important;
+          left: 0 !important;
+          width: 100vw !important;
+          height: 100dvh !important;
+          z-index: 9999 !important;
+          display: flex !important;
+          flex-direction: column !important;
+          box-sizing: border-box !important;
+          overflow: hidden !important;
+          background: var(--bg-card) !important;
+        }
+        .fullscreen-winprobability {
+          display: none !important;
+        }
 
-        {/* Match Timer */}
-        {matchStarted && (
-          <div style={{
-            display: 'flex',
-            justifyContent: 'center',
-            gap: 24,
-            marginTop: 12,
-            padding: '8px 0',
-          }}>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>Elapsed</div>
-              <div style={{
-                fontSize: 20,
-                fontWeight: 700,
-                fontFamily: 'var(--font-mono)',
-                color: 'var(--text-primary)',
-              }}>
-                <IconClock size={14} /> {formatTime(matchElapsed)}
+        /* Portrait fullscreen orientation styling */
+        @media (orientation: portrait) {
+          .fullscreen-scorecard {
+            padding: 6px 8px !important;
+            gap: 4px !important;
+          }
+          .fullscreen-header {
+            margin-bottom: 0 !important;
+            padding: 6px 10px !important;
+          }
+          .fullscreen-court-container {
+            flex: 1 1 0% !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            min-height: 0 !important;
+            overflow: hidden !important;
+          }
+          .fullscreen-court {
+            width: 100% !important;
+            min-height: 0 !important;
+            height: 100% !important;
+            max-height: 100% !important;
+            margin: 0 !important;
+            border-width: 8px !important;
+          }
+          .fullscreen-scorebar {
+            padding: 6px 12px !important;
+            margin-bottom: 2px !important;
+          }
+          .fullscreen-controls {
+            margin-bottom: 0 !important;
+            gap: 4px !important;
+          }
+          .fullscreen-controls > button,
+          .fullscreen-controls > .btn {
+            padding: 8px 6px !important;
+            font-size: 11px !important;
+          }
+          .fullscreen-declare-winner {
+            margin-bottom: 2px !important;
+          }
+          .fullscreen-declare-winner > button {
+            padding: 8px 10px !important;
+            font-size: 12px !important;
+          }
+        }
+
+        /* Landscape fullscreen orientation styling */
+        @media (orientation: landscape) {
+          .fullscreen-scorecard {
+            padding: 2px 8px !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: space-between !important;
+            gap: 2px !important;
+            height: 100dvh !important;
+            overflow: hidden !important;
+          }
+          .fullscreen-header {
+            margin-bottom: 0 !important;
+            padding: 2px 8px !important;
+          }
+          .fullscreen-header h2,
+          .fullscreen-header span,
+          .fullscreen-header div {
+            font-size: 11px !important;
+          }
+          .fullscreen-court-container {
+            flex: 1 1 0% !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            height: 100% !important;
+            min-height: 0 !important;
+            overflow: hidden !important;
+          }
+          .fullscreen-court {
+            height: 100% !important;
+            min-height: 0 !important;
+            max-height: 82vh !important;
+            width: auto !important;
+            aspect-ratio: 2 / 1 !important;
+            margin: 0 auto !important;
+            border-width: 4px !important;
+          }
+          .fullscreen-scorebar {
+            padding: 2px 8px !important;
+            margin-bottom: 0 !important;
+            font-size: 11px !important;
+          }
+          .fullscreen-controls {
+            margin-bottom: 0 !important;
+            gap: 2px !important;
+          }
+          .fullscreen-controls > button,
+          .fullscreen-controls > .btn {
+            padding: 4px 6px !important;
+            font-size: 10px !important;
+          }
+          .fullscreen-declare-winner {
+            margin-bottom: 0 !important;
+          }
+          .fullscreen-declare-winner > button {
+            padding: 4px 8px !important;
+            font-size: 10px !important;
+          }
+          .portrait-only {
+            display: none !important;
+          }
+        }
+
+        @media print {
+          body, html {
+            background: #ffffff !important;
+            color: #121212 !important;
+          }
+          /* Hide non-printable components */
+          .no-print,
+          header,
+          nav,
+          aside,
+          button,
+          select,
+          .btn,
+          .input,
+          .input-group,
+          svg:not(.printable-svg) {
+            display: none !important;
+          }
+          /* Override dark theme background and text color to clean white and high contrast black */
+          .glass-card, 
+          div, 
+          span, 
+          h1, 
+          h2, 
+          h3, 
+          h4, 
+          table, 
+          th, 
+          td {
+            background: transparent !important;
+            color: #121212 !important;
+            border-color: #cbd5e1 !important;
+            box-shadow: none !important;
+            text-shadow: none !important;
+          }
+          table {
+            width: 100% !important;
+            border-collapse: collapse !important;
+          }
+          th {
+            background-color: #f1f5f9 !important;
+            border-bottom: 2px solid #cbd5e1 !important;
+            color: #334155 !important;
+          }
+          td {
+            border-bottom: 1px solid #e2e8f0 !important;
+          }
+        }
+      `}} />
+
+      {/* BWF Countdown Interval screen overlay */}
+      {intervalActive && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: '#0a0a0a', display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+          zIndex: 2000, padding: 24
+        }}>
+          {intervalType === 'mid-game' ? (
+            <>
+              <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                11, {currentSetNumber}. Interval
               </div>
-            </div>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>Play Time</div>
-              <div style={{
-                fontSize: 16,
-                fontWeight: 600,
-                fontFamily: 'var(--font-mono)',
-                color: 'var(--score-live)',
-              }}>
-                {formatTime(Math.max(0, playTime))}
+              <div style={{ fontSize: 120, fontWeight: 800, fontFamily: 'var(--font-mono)', color: '#fff', lineHeight: 1, marginBottom: 40 }}>
+                {intervalTimeLeft}
               </div>
-            </div>
-            {totalPausedTime > 0 && (
-              <div style={{ textAlign: 'center' }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>Paused Total</div>
-                <div style={{
-                  fontSize: 16,
-                  fontWeight: 600,
-                  fontFamily: 'var(--font-mono)',
-                  color: 'var(--score-point)',
-                }}>
-                  {formatTime(totalPausedTime)}
+              <button
+                className="btn btn-primary btn-lg"
+                onClick={() => setIntervalActive(false)}
+                style={{ minWidth: 220, fontSize: 16, padding: '14px 32px' }}
+              >
+                Resume game
+              </button>
+            </>
+          ) : (
+            <>
+              <div style={{
+                background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)',
+                padding: 24, width: '100%', maxWidth: 480, marginBottom: 32
+              }}>
+                <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12, color: 'var(--score-win)' }}>
+                  {gameWinnerSummary}
+                </h2>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  <span>{match.player1_name}</span>
+                  <span>{state.sets.map(s => s.player1_score).join('  ')}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginTop: 4 }}>
+                  <span>{match.player2_name}</span>
+                  <span>{state.sets.map(s => s.player2_score).join('  ')}</span>
                 </div>
               </div>
-            )}
-          </div>
-        )}
 
-        {isPaused && (
-          <div style={{
-            textAlign: 'center',
-            marginTop: 12,
-            padding: '10px 16px',
-            borderRadius: 'var(--radius-md)',
-            background: 'rgba(245, 158, 11, 0.1)',
-            border: '1px solid rgba(245, 158, 11, 0.2)',
-          }}>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>⏸ Pause Duration</div>
-            <div style={{
-              fontSize: 32,
-              fontWeight: 700,
-              fontFamily: 'var(--font-mono)',
-              color: 'var(--score-point)',
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 8 }}>Interval</div>
+              <div style={{ fontSize: 100, fontWeight: 800, fontFamily: 'var(--font-mono)', color: '#fff', lineHeight: 1, marginBottom: 12 }}>
+                {intervalTimeLeft}
+              </div>
+
+              {isDoubles && (
+                <div style={{
+                  background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                  padding: 16, marginBottom: 24, width: '100%', maxWidth: 320, textAlign: 'center'
+                }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>Rearrange players for next game</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                    <div style={{ padding: 8, background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)', fontSize: 12, fontWeight: 600 }}>
+                      {courtSides.left === 'player1' ? t1Positions.left : t2Positions.left}
+                    </div>
+                    <div style={{ padding: 8, background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)', fontSize: 12, fontWeight: 600 }}>
+                      {courtSides.right === 'player1' ? t1Positions.right : t2Positions.right}
+                    </div>
+                    <div style={{ padding: 8, background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)', fontSize: 12, fontWeight: 600 }}>
+                      {courtSides.left === 'player1' ? t1Positions.right : t2Positions.right}
+                    </div>
+                    <div style={{ padding: 8, background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)', fontSize: 12, fontWeight: 600 }}>
+                      {courtSides.right === 'player1' ? t1Positions.left : t2Positions.left}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 10 }}>
+                    <button className="btn btn-secondary btn-sm" onClick={handleSwitchSides} style={{ fontSize: 11 }}>🔄 Switch Ends</button>
+                    {isDoubles && (
+                      <>
+                        <button className="btn btn-secondary btn-sm" onClick={() => handleSwapPartners('player1')} style={{ fontSize: 11 }}>👥 Swap L</button>
+                        <button className="btn btn-secondary btn-sm" onClick={() => handleSwapPartners('player2')} style={{ fontSize: 11 }}>👥 Swap R</button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 16, justifyContent: 'center' }}>
+                <button className="btn btn-primary" onClick={() => setIntervalActive(false)} style={{ minWidth: 120 }}>▶ Continue</button>
+                <button className="btn btn-secondary" onClick={handleUndo}>↩ Undo</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ═══════════ GAME HEADER ═══════════ */}
+      <div 
+        className={isScoringFullscreen ? 'fullscreen-header' : ''}
+        style={{
+          background: 'var(--bg-secondary)', 
+          borderRadius: 'var(--radius-lg)', 
+          padding: '12px 16px',
+          marginBottom: isScoringFullscreen ? 0 : 10, 
+          border: '1px solid var(--border)',
+          boxShadow: 'var(--glass-shadow)',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <span style={{ fontSize: 18, fontWeight: 800, color: 'var(--score-live)', textShadow: '0 0 8px var(--score-live-glow)' }}>Game {currentSetNumber}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6 }}>
+              🏸 Badminton · {selectedCourt} · {match.is_adhoc ? (match.round_name || 'Ad-hoc Match') : `${tournament?.name || ''}${event?.event_name ? ` · ${event.event_name}` : ''}`}
+              {match.max_viewers !== undefined && match.max_viewers > 0 && (
+                <span style={{ color: 'var(--score-win)', background: 'var(--accent-subtle)', padding: '2px 6px', borderRadius: 4, fontWeight: 600, fontSize: 10, border: '1px solid var(--border)' }}>
+                  👁️ {match.max_viewers} peak
+                </span>
+              )}
+            </span>
+            <button
+              className="btn btn-ghost"
+              onClick={() => setShowMediaModal(true)}
+              style={{ height: 28, fontSize: 12, padding: '0 8px', display: 'flex', alignItems: 'center', gap: 4, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text-primary)' }}
+              title="Manage Match Media"
+            >
+              📷 Media
+            </button>
+            <button
+              className="btn btn-ghost btn-icon"
+              onClick={() => setSettingsOpen(true)}
+              style={{ width: 28, height: 28, fontSize: 14, padding: 0 }}
+              title="Settings"
+            >⚙️</button>
+            <button
+              className="btn btn-ghost"
+              onClick={toggleFullscreen}
+              style={{ 
+                height: 28, fontSize: 12, padding: '0 8px', display: 'flex', alignItems: 'center', gap: 4,
+                background: isScoringFullscreen ? 'rgba(239, 68, 68, 0.2)' : 'var(--bg-card)',
+                border: '1px solid var(--border)',
+                borderRadius: 4, 
+                color: isScoringFullscreen ? '#f87171' : 'var(--text-primary)',
+                fontWeight: 600
+              }}
+              title={isScoringFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+            >
+              {isScoringFullscreen ? "📴 Exit" : "⛶ Fullscreen"}
+            </button>
+          </div>
+        </div>
+
+        {/* Player names + all set scores in a compact strip */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{
+              fontSize: 14, fontWeight: 700, flex: 1, 
+              color: servingTeam === 'player1' ? 'var(--score-point)' : 'var(--text-primary)',
+              textShadow: servingTeam === 'player1' ? '0 0 8px var(--accent-glow)' : 'none',
+              ...(state.matchWinnerId === match.player1_id ? { color: 'var(--score-win)' } : {})
             }}>
-              {formatTime(pauseElapsed)}
-            </div>
-          </div>
-        )}
-
-        {/* Sets won indicator */}
-        <div style={{
-          display: 'flex',
-          justifyContent: 'center',
-          gap: 40,
-          marginTop: 12,
-        }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Sets Won</div>
-            <div style={{ display: 'flex', gap: 4 }}>
-              {[0, 1].map(i => (
-                <div key={i} style={{
-                  width: 12, height: 12, borderRadius: '50%',
-                  background: i < state.player1SetsWon ? 'var(--score-win)' : 'var(--bg-elevated)',
-                  border: '2px solid var(--border)',
-                }} />
-              ))}
-            </div>
-          </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Sets Won</div>
-            <div style={{ display: 'flex', gap: 4 }}>
-              {[0, 1].map(i => (
-                <div key={i} style={{
-                  width: 12, height: 12, borderRadius: '50%',
-                  background: i < state.player2SetsWon ? 'var(--score-win)' : 'var(--bg-elevated)',
-                  border: '2px solid var(--border)',
-                }} />
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {isDeuceState && !state.isMatchComplete && (
-          <div style={{
-            textAlign: 'center',
-            marginTop: 12,
-            padding: '6px 16px',
-            borderRadius: 'var(--radius-full)',
-            background: 'rgba(245, 158, 11, 0.1)',
-            color: 'var(--score-point)',
-            fontSize: 13,
-            fontWeight: 600,
-          }}>
-            ⚡ DEUCE
-          </div>
-        )}
-
-        {gamePointPlayer && !isDeuceState && !state.isMatchComplete && (
-          <div style={{
-            textAlign: 'center',
-            marginTop: 12,
-            padding: '6px 16px',
-            borderRadius: 'var(--radius-full)',
-            background: 'rgba(34, 197, 94, 0.1)',
-            color: 'var(--score-win)',
-            fontSize: 13,
-            fontWeight: 600,
-          }}>
-            🏆 Game Point — {gamePointPlayer === match.player1_id ? match.player1_name : match.player2_name}
-          </div>
-        )}
-      </div>
-
-      {/* Score Display & Buttons */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 1fr',
-        gap: 16,
-        marginBottom: 20,
-      }}>
-        {/* Player 1 */}
-        <div>
-          <button
-            className="score-button"
-            onClick={() => handleScore('player1')}
-            disabled={isPaused || state.isMatchComplete}
-            style={{
-              borderColor: lastScored === 'player1' ? 'var(--accent)' : undefined,
-              boxShadow: lastScored === 'player1' ? '0 0 30px var(--accent-glow)' : undefined,
-            }}
-          >
-            <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 8 }}>
+              {servingTeam === 'player1' && !state.isMatchComplete && <span style={{ color: '#ef4444', marginRight: 6 }}>🏸</span>}
               {match.player1_name}
+            </span>
+            <div style={{ display: 'flex', gap: 6, fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 14 }}>
+              {state.sets.map((s, i) => (
+                <span key={i} style={{
+                  color: s.winner_id === match.player1_id ? 'var(--score-win)' :
+                         s.winner_id === match.player2_id ? 'var(--text-muted)' : 'var(--text-primary)',
+                  minWidth: 20, textAlign: 'center',
+                  ...(i === state.currentSet && !s.is_complete ? {
+                    background: 'var(--accent-subtle)', 
+                    borderRadius: 4, 
+                    padding: '2px 6px',
+                    border: '1px solid var(--border-accent)',
+                  } : {
+                    background: 'var(--bg-secondary)',
+                    borderRadius: 4,
+                    padding: '2px 4px',
+                    border: '1px solid var(--border)',
+                  })
+                }}>{s.player1_score}</span>
+              ))}
             </div>
-            <div className={`score-display ${lastScored === 'player1' ? 'score-animate' : ''}`}>
-              {currentSet?.player1_score ?? 0}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{
+              fontSize: 14, fontWeight: 700, flex: 1, 
+              color: servingTeam === 'player2' ? 'var(--score-point)' : 'var(--text-primary)',
+              textShadow: servingTeam === 'player2' ? '0 0 8px var(--accent-glow)' : 'none',
+              ...(state.matchWinnerId === match.player2_id ? { color: 'var(--score-win)' } : {})
+            }}>
+              {servingTeam === 'player2' && !state.isMatchComplete && <span style={{ color: '#ef4444', marginRight: 6 }}>🏸</span>}
+              {match.player2_name}
+            </span>
+            <div style={{ display: 'flex', gap: 6, fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 14 }}>
+              {state.sets.map((s, i) => (
+                <span key={i} style={{
+                  color: s.winner_id === match.player2_id ? 'var(--score-win)' :
+                         s.winner_id === match.player1_id ? 'var(--text-muted)' : 'var(--text-primary)',
+                  minWidth: 20, textAlign: 'center',
+                  ...(i === state.currentSet && !s.is_complete ? {
+                    background: 'var(--accent-subtle)', 
+                    borderRadius: 4, 
+                    padding: '2px 6px',
+                    border: '1px solid var(--border-accent)',
+                  } : {
+                    background: 'var(--bg-secondary)',
+                    borderRadius: 4,
+                    padding: '2px 4px',
+                    border: '1px solid var(--border)',
+                  })
+                }}>{s.player2_score}</span>
+              ))}
             </div>
-            {state.isMatchComplete && state.matchWinnerId === match.player1_id && (
-              <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, color: 'var(--score-win)' }}>
-                <IconTrophy size={18} /> Winner
-              </div>
-            )}
-          </button>
+          </div>
         </div>
 
-        {/* Player 2 */}
-        <div>
-          <button
-            className="score-button"
-            onClick={() => handleScore('player2')}
-            disabled={isPaused || state.isMatchComplete}
-            style={{
-              borderColor: lastScored === 'player2' ? 'var(--accent)' : undefined,
-              boxShadow: lastScored === 'player2' ? '0 0 30px var(--accent-glow)' : undefined,
-            }}
-          >
-            <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-secondary)', marginBottom: 8 }}>
-              {match.player2_name}
-            </div>
-            <div className={`score-display ${lastScored === 'player2' ? 'score-animate' : ''}`}>
-              {currentSet?.player2_score ?? 0}
-            </div>
-            {state.isMatchComplete && state.matchWinnerId === match.player2_id && (
-              <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, color: 'var(--score-win)' }}>
-                <IconTrophy size={18} /> Winner
-              </div>
-            )}
-          </button>
+        {/* Timer + sets won */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 10, fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
+          <span>⏱ {formatTime(playTime)}</span>
+          <span>Sets: {state.player1SetsWon} - {state.player2SetsWon} (Best of {bestOfGames})</span>
+        </div>
+
+        {/* Win Predictor Gauge */}
+        <div className={isScoringFullscreen ? 'fullscreen-winprobability' : ''}>
+          <WinPredictorGauge 
+            player1Name={match.player1_name}
+            player2Name={match.player2_name}
+            player1Score={currentSet?.player1_score ?? 0}
+            player2Score={currentSet?.player2_score ?? 0}
+            player1Sets={state.player1SetsWon}
+            player2Sets={state.player2SetsWon}
+            servingTeam={servingTeam}
+          />
         </div>
       </div>
 
-      {/* Controls */}
-      <div style={{
-        display: 'flex',
-        justifyContent: 'center',
-        gap: 12,
-        marginBottom: 24,
-      }}>
+      {/* Status indicators */}
+      {isDeuceActive && !state.isMatchComplete && (
+        <div style={{ textAlign: 'center', background: 'rgba(245,158,11,0.15)', color: 'var(--score-point)', padding: '6px 16px', borderRadius: 'var(--radius-full)', marginBottom: 10, fontSize: 12, fontWeight: 700 }}>
+          ⚡ DEUCE (Cap: {maxCapPoints})
+        </div>
+      )}
+      {gamePointPlayer && !isDeuceActive && !state.isMatchComplete && (
+        <div style={{ textAlign: 'center', background: 'rgba(34,197,94,0.15)', color: 'var(--score-win)', padding: '6px 16px', borderRadius: 'var(--radius-full)', marginBottom: 10, fontSize: 12, fontWeight: 700 }}>
+          🏆 GAME POINT — {gamePointPlayer === match.player1_id ? match.player1_name : match.player2_name}
+        </div>
+      )}
+      {isPaused && !state.isMatchComplete && (
+        <div style={{ textAlign: 'center', background: 'rgba(245,158,11,0.15)', color: 'var(--score-point)', padding: '8px 16px', borderRadius: 'var(--radius-full)', marginBottom: 10, fontSize: 14, fontWeight: 700 }}>
+          ⏸ MATCH PAUSED — Tap resume to continue
+        </div>
+      )}
+ 
+      {isScoringFullscreen && (
+        <div className="portrait-only" style={{
+          textAlign: 'center',
+          fontSize: 12,
+          fontWeight: 600,
+          color: 'var(--text-secondary)',
+          background: 'rgba(99, 102, 241, 0.1)',
+          border: '1px solid rgba(99, 102, 241, 0.25)',
+          padding: '8px 16px',
+          borderRadius: 'var(--radius-md)',
+          marginBottom: 16,
+          boxShadow: 'var(--glass-shadow)',
+        }}>
+          🔄 Rotate phone to landscape (horizontal) for a wider court scoreboard!
+        </div>
+      )}
+
+      {/* ═══════════ INTERACTIVE COURT SCORING ═══════════ */}
+      <div 
+        className={isScoringFullscreen ? 'fullscreen-court-container' : ''} 
+        style={isScoringFullscreen ? { flexGrow: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 0 } : undefined}
+      >
+        <div 
+          className={isScoringFullscreen ? 'fullscreen-court' : ''}
+          style={{
+            position: 'relative',
+            width: '100%',
+            background: '#008751', // Authentic green mat color from reference picture
+            border: '12px solid #008751', // Green margin border from picture
+            borderRadius: 'var(--radius-lg)',
+            boxShadow: '0 12px 40px rgba(0, 0, 0, 0.45)',
+            marginBottom: isScoringFullscreen ? 0 : 12,
+            overflow: 'hidden',
+            minHeight: isScoringFullscreen ? undefined : (isDoubles ? 260 : 200),
+            opacity: isPaused || state.isMatchComplete ? 0.4 : 1,
+            pointerEvents: isPaused || state.isMatchComplete ? 'none' : 'auto',
+            transition: 'opacity 0.2s',
+          }}
+        >
+        {/* Court markings (White lines, 2.5px) */}
+        {/* Outer Court Boundary */}
+        <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, border: '3px solid #ffffff', pointerEvents: 'none' }} />
+        
+        {/* Top & Bottom Singles Sidelines (Inner side lines) */}
+        <div style={{ position: 'absolute', top: '7.5%', left: 0, right: 0, borderTop: '2.5px solid #ffffff', pointerEvents: 'none' }} />
+        <div style={{ position: 'absolute', bottom: '7.5%', left: 0, right: 0, borderTop: '2.5px solid #ffffff', pointerEvents: 'none' }} />
+        
+        {/* Left Short Service Line */}
+        <div style={{ position: 'absolute', top: 0, bottom: 0, left: '35.2%', borderLeft: '2.5px solid #ffffff', pointerEvents: 'none' }} />
+        
+        {/* Right Short Service Line */}
+        <div style={{ position: 'absolute', top: 0, bottom: 0, left: '64.8%', borderLeft: '2.5px solid #ffffff', pointerEvents: 'none' }} />
+        
+        {/* Center Net Divider (Vertical dashed line exactly in the middle) */}
+        <div style={{
+          position: 'absolute', top: 0, bottom: 0, left: '50%',
+          width: '3px',
+          transform: 'translateX(-50%)',
+          backgroundImage: 'linear-gradient(to bottom, #ffffff 55%, transparent 45%)',
+          backgroundSize: '3px 8px',
+          backgroundRepeat: 'repeat-y',
+          zIndex: 15, pointerEvents: 'none'
+        }} />
+        
+        {/* Left Center Line (horizontal divider between left service courts) */}
+        <div style={{ position: 'absolute', top: '50%', left: 0, right: '64.8%', borderTop: '2.5px solid #ffffff', pointerEvents: 'none' }} />
+        
+        {/* Right Center Line (horizontal divider between right service courts) */}
+        <div style={{ position: 'absolute', top: '50%', left: '64.8%', right: 0, borderTop: '2.5px solid #ffffff', pointerEvents: 'none' }} />
+        
+        {/* Left Doubles Long Service Line */}
+        <div style={{ position: 'absolute', top: 0, bottom: 0, left: '5.7%', borderLeft: '2.5px solid #ffffff', pointerEvents: 'none' }} />
+        
+        {/* Right Doubles Long Service Line */}
+        <div style={{ position: 'absolute', top: 0, bottom: 0, right: '5.7%', borderRight: '2.5px solid #ffffff', pointerEvents: 'none' }} />
+
+        {/* Serve quadrant highlights */}
+        {servingTeam === courtSides.left && isDoubles && (
+          <div style={{
+            position: 'absolute',
+            top: isServerScoreEven ? '50%' : 0,
+            bottom: isServerScoreEven ? 0 : '50%',
+            left: '5.7%', right: '64.8%',
+            background: 'rgba(239, 68, 68, 0.25)',
+            borderBottom: isServerScoreEven ? 'none' : '2px solid rgba(239, 68, 68, 0.5)',
+            borderTop: isServerScoreEven ? '2px solid rgba(239, 68, 68, 0.5)' : 'none',
+            pointerEvents: 'none',
+            borderRadius: 4,
+          }} />
+        )}
+        {servingTeam === courtSides.left && !isDoubles && (
+          <div style={{
+            position: 'absolute', 
+            top: isServerScoreEven ? '50%' : '7.5%',
+            bottom: isServerScoreEven ? '7.5%' : '50%',
+            left: 0, right: '64.8%',
+            background: 'rgba(239, 68, 68, 0.25)',
+            border: '2px solid rgba(239, 68, 68, 0.4)',
+            pointerEvents: 'none',
+            borderRadius: 4,
+            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+          }} />
+        )}
+        {servingTeam === courtSides.right && isDoubles && (
+          <div style={{
+            position: 'absolute',
+            top: isServerScoreEven ? 0 : '50%',
+            bottom: isServerScoreEven ? '50%' : 0,
+            left: '64.8%', right: '5.7%',
+            background: 'rgba(239, 68, 68, 0.25)',
+            borderBottom: isServerScoreEven ? '2px solid rgba(239, 68, 68, 0.5)' : 'none',
+            borderTop: isServerScoreEven ? 'none' : '2px solid rgba(239, 68, 68, 0.5)',
+            pointerEvents: 'none',
+            borderRadius: 4,
+          }} />
+        )}
+        {servingTeam === courtSides.right && !isDoubles && (
+          <div style={{
+            position: 'absolute', 
+            top: isServerScoreEven ? '7.5%' : '50%',
+            bottom: isServerScoreEven ? '50%' : '7.5%',
+            left: '64.8%', right: 0,
+            background: 'rgba(239, 68, 68, 0.25)',
+            border: '2px solid rgba(239, 68, 68, 0.4)',
+            pointerEvents: 'none',
+            borderRadius: 4,
+            transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+          }} />
+        )}
+
+        {/* Left Side Player Elements */}
+        {isDoubles ? (
+          <>
+            {/* Top Left Quadrant (Doubles Left Court) */}
+            <div style={{
+              position: 'absolute', top: '5%', bottom: '50%', left: '5.7%', right: '55%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+              pointerEvents: 'none', zIndex: 15,
+            }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: '#ffffff', textShadow: '0 2.5px 8px rgba(0,0,0,0.95)', textAlign: 'center', lineHeight: 1.2 }}>
+                {courtSides.left === 'player1' ? t1Positions.left : t2Positions.left}
+              </span>
+              {servingTeam === courtSides.left && !isServerScoreEven && (
+                <span style={{ fontSize: 8, background: '#ef4444', color: '#fff', padding: '1.5px 5px', borderRadius: 4, marginTop: 4, fontWeight: 700, letterSpacing: 0.5, boxShadow: '0 2px 6px rgba(0,0,0,0.45)' }}>SERVING</span>
+              )}
+            </div>
+            {/* Bottom Left Quadrant (Doubles Right Court) */}
+            <div style={{
+              position: 'absolute', top: '50%', bottom: '5%', left: '5.7%', right: '55%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+              pointerEvents: 'none', zIndex: 15,
+            }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: '#ffffff', textShadow: '0 2.5px 8px rgba(0,0,0,0.95)', textAlign: 'center', lineHeight: 1.2 }}>
+                {courtSides.left === 'player1' ? t1Positions.right : t2Positions.right}
+              </span>
+              {servingTeam === courtSides.left && isServerScoreEven && (
+                <span style={{ fontSize: 8, background: '#ef4444', color: '#fff', padding: '1.5px 5px', borderRadius: 4, marginTop: 4, fontWeight: 700, letterSpacing: 0.5, boxShadow: '0 2px 6px rgba(0,0,0,0.45)' }}>SERVING</span>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            {/* Singles Left Player: Top (Odd) or Bottom (Even) -- BWF Diagonal! */}
+            <div style={{
+              position: 'absolute',
+              top: !isServerScoreEven ? '7.5%' : '50%',
+              bottom: !isServerScoreEven ? '50%' : '7.5%',
+              left: '5.7%', right: '55%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+              pointerEvents: 'none', zIndex: 15,
+              transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            }}>
+              <span style={{ fontSize: 13, fontWeight: 800, color: '#ffffff', textShadow: '0 2.5px 8px rgba(0,0,0,0.95)', textAlign: 'center', lineHeight: 1.2 }}>
+                {courtSides.left === 'player1' ? match.player1_name : match.player2_name}
+              </span>
+              {servingTeam === courtSides.left && (
+                <span style={{ fontSize: 8, background: '#ef4444', color: '#fff', padding: '1.5px 5px', borderRadius: 4, marginTop: 4, fontWeight: 700, letterSpacing: 0.5, boxShadow: '0 2px 6px rgba(0,0,0,0.45)' }}>SERVING</span>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* Right Side Player Elements */}
+        {isDoubles ? (
+          <>
+            {/* Top Right Quadrant (Doubles Right Court) */}
+            <div style={{
+              position: 'absolute', top: '5%', bottom: '50%', left: '55%', right: '5.7%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+              pointerEvents: 'none', zIndex: 15,
+            }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: '#ffffff', textShadow: '0 2.5px 8px rgba(0,0,0,0.95)', textAlign: 'center', lineHeight: 1.2 }}>
+                {courtSides.right === 'player1' ? t1Positions.right : t2Positions.right}
+              </span>
+              {servingTeam === courtSides.right && isServerScoreEven && (
+                <span style={{ fontSize: 8, background: '#ef4444', color: '#fff', padding: '1.5px 5px', borderRadius: 4, marginTop: 4, fontWeight: 700, letterSpacing: 0.5, boxShadow: '0 2px 6px rgba(0,0,0,0.45)' }}>SERVING</span>
+              )}
+            </div>
+            {/* Bottom Right Quadrant (Doubles Left Court) */}
+            <div style={{
+              position: 'absolute', top: '50%', bottom: '5%', left: '55%', right: '5.7%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+              pointerEvents: 'none', zIndex: 15,
+            }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: '#ffffff', textShadow: '0 2.5px 8px rgba(0,0,0,0.95)', textAlign: 'center', lineHeight: 1.2 }}>
+                {courtSides.right === 'player1' ? t1Positions.left : t2Positions.left}
+              </span>
+              {servingTeam === courtSides.right && !isServerScoreEven && (
+                <span style={{ fontSize: 8, background: '#ef4444', color: '#fff', padding: '1.5px 5px', borderRadius: 4, marginTop: 4, fontWeight: 700, letterSpacing: 0.5, boxShadow: '0 2px 6px rgba(0,0,0,0.45)' }}>SERVING</span>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            {/* Singles Right Player: Top (Even) or Bottom (Odd) -- BWF Diagonal! */}
+            <div style={{
+              position: 'absolute',
+              top: isServerScoreEven ? '7.5%' : '50%',
+              bottom: isServerScoreEven ? '50%' : '7.5%',
+              left: '55%', right: '5.7%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+              pointerEvents: 'none', zIndex: 15,
+              transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            }}>
+              <span style={{ fontSize: 13, fontWeight: 800, color: '#ffffff', textShadow: '0 2.5px 8px rgba(0,0,0,0.95)', textAlign: 'center', lineHeight: 1.2 }}>
+                {courtSides.right === 'player1' ? match.player1_name : match.player2_name}
+              </span>
+              {servingTeam === courtSides.right && (
+                <span style={{ fontSize: 8, background: '#ef4444', color: '#fff', padding: '1.5px 5px', borderRadius: 4, marginTop: 4, fontWeight: 700, letterSpacing: 0.5, boxShadow: '0 2px 6px rgba(0,0,0,0.45)' }}>SERVING</span>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* LEFT TOUCH ZONE BUTTON */}
         <button
-          className="btn btn-secondary"
+          onClick={() => handleScore(courtSides.left)}
+          disabled={isPaused || state.isMatchComplete}
+          style={{
+            position: 'absolute', top: 0, bottom: 0, left: 0, width: '50%',
+            background: 'transparent', border: 'none', cursor: 'pointer',
+            touchAction: 'manipulation', zIndex: 10,
+          }}
+          onPointerDown={e => e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'}
+          onPointerUp={e => e.currentTarget.style.background = 'transparent'}
+          onPointerLeave={e => e.currentTarget.style.background = 'transparent'}
+        >
+          {/* +1 visual indicator */}
+          <div style={{
+            position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)',
+            fontSize: 16, fontWeight: 900, color: '#fff',
+            background: 'rgba(34, 197, 94, 0.85)', padding: '6px 14px', borderRadius: 20,
+            pointerEvents: 'none', letterSpacing: 1,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+          }}>+1</div>
+        </button>
+
+        {/* RIGHT TOUCH ZONE BUTTON */}
+        <button
+          onClick={() => handleScore(courtSides.right)}
+          disabled={isPaused || state.isMatchComplete}
+          style={{
+            position: 'absolute', top: 0, bottom: 0, right: 0, width: '50%',
+            background: 'transparent', border: 'none', cursor: 'pointer',
+            touchAction: 'manipulation', zIndex: 10,
+          }}
+          onPointerDown={e => e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'}
+          onPointerUp={e => e.currentTarget.style.background = 'transparent'}
+          onPointerLeave={e => e.currentTarget.style.background = 'transparent'}
+        >
+          {/* +1 visual indicator */}
+          <div style={{
+            position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
+            fontSize: 16, fontWeight: 900, color: '#fff',
+            background: 'rgba(34, 197, 94, 0.85)', padding: '6px 14px', borderRadius: 20,
+            pointerEvents: 'none', letterSpacing: 1,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+          }}>+1</div>
+        </button>
+      </div>
+      </div>
+
+      {/* ═══════════ SCORE & SERVICE STATUS BAR ═══════════ */}
+      <div 
+        className={isScoringFullscreen ? 'fullscreen-scorebar' : ''}
+        style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        background: 'var(--bg-secondary)', 
+        borderRadius: 'var(--radius-md)', 
+        padding: '12px 18px',
+        marginBottom: isScoringFullscreen ? 0 : 10, 
+        border: '1px solid var(--border)',
+        boxShadow: 'var(--glass-shadow)',
+      }}>
+        <div style={{ fontSize: 13, color: 'var(--text-primary)', fontWeight: 700, minWidth: 0, flex: 1 }}>
+          {lastScored === servingTeam
+            ? `${servingTeam === 'player1' ? match.player1_name : match.player2_name} serving`
+            : lastScored !== null
+              ? 'Service over'
+              : `${servingTeam === 'player1' ? match.player1_name : match.player2_name} to serve`
+          }
+        </div>
+        <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 900, fontSize: 32, letterSpacing: 4, flexShrink: 0, color: 'var(--text-primary)' }}>
+          <span style={{ 
+            color: lastScored === courtSides.left ? 'var(--accent)' : 'var(--text-primary)',
+          }}>{leftScore}</span>
+          <span style={{ color: 'var(--text-muted)', margin: '0 8px' }}>,</span>
+          <span style={{ 
+            color: lastScored === courtSides.right ? 'var(--accent)' : 'var(--text-primary)',
+          }}>{rightScore}</span>
+        </div>
+        <button
+          className="btn btn-ghost"
           onClick={handleUndo}
           disabled={state.isMatchComplete}
+          style={{ 
+            padding: '6px 12px', 
+            fontSize: 13, 
+            fontWeight: 700, 
+            flexShrink: 0, 
+            marginLeft: 8,
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)',
+            color: 'var(--text-primary)'
+          }}
         >
-          <IconUndo size={16} /> Undo
+          Undo ↩
         </button>
-
+      </div>
+ 
+      {/* ═══════════ CONTROLS ═══════════ */}
+      <div 
+        className={isScoringFullscreen ? 'fullscreen-controls' : ''}
+        style={{ display: 'flex', gap: 6, marginBottom: isScoringFullscreen ? 0 : 12 }}
+      >
         <button
-          className={`btn ${isPaused ? 'btn-primary' : 'btn-secondary'}`}
-          onClick={() => setIsPaused(!isPaused)}
-          disabled={state.isMatchComplete || !matchStarted}
+          onClick={() => {
+            const nextPaused = !isPaused;
+            setIsPaused(nextPaused);
+            const cs = state.sets[state.currentSet];
+            const scoreInfo = cs ? `Score: ${cs.player1_score}-${cs.player2_score}` : '';
+            logAction(
+              nextPaused ? 'Match Paused' : 'Match Resumed',
+              'match',
+              `Match: ${match.player1_name} vs ${match.player2_name} | ${scoreInfo} | ${nextPaused ? 'Paused' : 'Resumed'} by umpire`,
+              user ? { id: user.id, name: user.name } : null
+            ).catch(() => {});
+          }}
+          disabled={state.isMatchComplete}
+          style={{ 
+            flex: 1.5,
+            padding: '10px 14px',
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: 'pointer',
+            borderRadius: 'var(--radius-md)',
+            border: isPaused ? 'none' : '1px solid var(--border)',
+            background: isPaused ? 'linear-gradient(135deg, #eab308 0%, #ca8a04 100%)' : 'var(--bg-secondary)',
+            color: isPaused ? '#000000' : 'var(--text-primary)',
+            boxShadow: isPaused ? '0 0 15px rgba(234,179,8,0.3)' : 'none',
+          }}
         >
-          {isPaused ? <><IconPlay size={16} /> Resume</> : <><IconPause size={16} /> Pause</>}
+          {isPaused ? '▶ Resume' : '⏸ Pause'}
         </button>
-
-        <button
-          className="btn btn-danger"
-          onClick={handleReset}
-        >
-          Reset Match
+ 
+        {isDoubles && (
+          <>
+            <button className="btn btn-secondary" onClick={handleSwitchSides} style={{ flex: 1, padding: '10px 8px', fontSize: 11, background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}>🔄 Ends</button>
+            <button className="btn btn-secondary" onClick={() => handleSwapPartners(courtSides.left)} style={{ flex: 1, padding: '10px 8px', fontSize: 11, background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}>👥 L</button>
+            <button className="btn btn-secondary" onClick={() => handleSwapPartners(courtSides.right)} style={{ flex: 1, padding: '10px 8px', fontSize: 11, background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}>👥 R</button>
+          </>
+        )}
+        {!isDoubles && (
+          <button className="btn btn-secondary" onClick={handleSwitchSides} style={{ flex: 1, padding: '10px 8px', fontSize: 11, background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}>🔄 Ends</button>
+        )}
+ 
+        <button className="btn btn-danger" onClick={handleReset} style={{ flex: 1, padding: '10px 8px', fontSize: 11, background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#ef4444' }}>
+          Reset
         </button>
       </div>
 
-      {/* Set History */}
-      {state.sets.length > 0 && (
-        <div className="glass-card" style={{ padding: 20 }}>
-          <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>Set History</h3>
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-            {state.sets.map((set, i) => (
+      {!state.isMatchComplete && (
+        <div className={isScoringFullscreen ? "no-print fullscreen-declare-winner" : "no-print"} style={{ display: 'flex', gap: 6, marginBottom: isScoringFullscreen ? 0 : 12 }}>
+          <button
+            onClick={() => setDeclareWinnerOpen(true)}
+            style={{
+              flex: 1,
+              padding: '10px 14px',
+              fontSize: 13,
+              fontWeight: 700,
+              cursor: 'pointer',
+              borderRadius: 'var(--radius-md)',
+              background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+              border: 'none',
+              color: '#000000',
+              boxShadow: '0 4px 12px rgba(245,158,11,0.2)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+              <polyline points="22 4 12 14.01 9 11.01" />
+            </svg>
+            Finish Match Early & Declare Winner
+          </button>
+        </div>
+      )}
+
+      {/* ═══════════ MATCH COMPLETE ═══════════ */}
+      {state.isMatchComplete && (
+        <div className="glass-card animate-slide-up" style={{
+          padding: 28, textAlign: 'center',
+          border: '1px solid rgba(34, 197, 94, 0.3)', background: 'rgba(34, 197, 94, 0.05)',
+        }}>
+          <div style={{ fontSize: 48, marginBottom: 8 }}>🏆</div>
+          <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>Match Complete!</h2>
+          <p style={{ fontSize: 18, color: 'var(--score-win)', fontWeight: 700 }}>
+            {state.matchWinnerId === match.player1_id ? match.player1_name : match.player2_name} wins!
+          </p>
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 6 }}>
+            Sets: {state.player1SetsWon} - {state.player2SetsWon} · Duration: {formatTime(playTime)}
+          </p>
+
+          {/* Score summary per set */}
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 16, flexWrap: 'wrap' }}>
+            {state.sets.filter(s => s.is_complete).map((set, i) => (
               <div key={i} style={{
-                padding: '10px 16px',
-                borderRadius: 'var(--radius-md)',
-                background: i === state.currentSet && !set.is_complete
-                  ? 'var(--accent-subtle)'
-                  : 'var(--bg-secondary)',
-                border: `1px solid ${i === state.currentSet && !set.is_complete ? 'var(--accent)' : 'var(--border)'}`,
-                textAlign: 'center',
-                minWidth: 80,
+                padding: '8px 14px', borderRadius: 'var(--radius-md)',
+                background: '#11131e', border: '1px solid rgba(255,255,255,0.08)',
+                textAlign: 'center', minWidth: 80,
               }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
-                  Set {set.set_number}
+                <div style={{ fontSize: 10, color: '#94a3b8', marginBottom: 3 }}>Game {set.set_number}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+                  <span style={{ color: set.winner_id === match.player1_id ? 'var(--score-win)' : '#94a3b8' }}>{set.player1_score}</span>
+                  <span style={{ color: '#94a3b8', margin: '0 3px' }}>-</span>
+                  <span style={{ color: set.winner_id === match.player2_id ? 'var(--score-win)' : '#94a3b8' }}>{set.player2_score}</span>
                 </div>
-                <div style={{
-                  fontSize: 20,
-                  fontWeight: 700,
-                  fontFamily: 'var(--font-mono)',
-                }}>
-                  <span style={{
-                    color: set.winner_id === match.player1_id ? 'var(--score-win)' : 'var(--text-primary)',
-                  }}>
-                    {set.player1_score}
-                  </span>
-                  <span style={{ color: 'var(--text-muted)', margin: '0 4px' }}>-</span>
-                  <span style={{
-                    color: set.winner_id === match.player2_id ? 'var(--score-win)' : 'var(--text-primary)',
-                  }}>
-                    {set.player2_score}
-                  </span>
-                </div>
-                {set.is_complete && (
-                  <div style={{ fontSize: 10, color: 'var(--score-win)', marginTop: 4 }}>
-                    ✓ Complete
-                  </div>
-                )}
               </div>
             ))}
           </div>
+
+          {/* SVG progression Line Graph */}
+          <ScoreProgressionGraph history={pointsHistory} />
+
+          {/* Score Sheet Table */}
+          <div style={{ marginTop: 24, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16, textAlign: 'left' }}>
+            <h4 style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6, color: '#ffffff' }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect width="8" height="4" x="8" y="2" rx="1" ry="1" />
+                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+              </svg>
+              Score Sheet
+            </h4>
+            <div style={{ overflowX: 'auto', background: '#11131e', borderRadius: 8, border: '1px solid rgba(255,255,255,0.08)', padding: 10 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)', color: '#94a3b8', fontWeight: 600 }}>
+                    <th style={{ padding: '5px 10px', textAlign: 'left' }}>Game</th>
+                    <th style={{ padding: '5px 10px', textAlign: 'center' }}>{match.player1_name}</th>
+                    <th style={{ padding: '5px 10px', textAlign: 'center' }}>{match.player2_name}</th>
+                    <th style={{ padding: '5px 10px', textAlign: 'left' }}>Winner</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {state.sets.map((set, sIdx) => (
+                    <tr key={sIdx} style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                      <td style={{ padding: '6px 10px', fontWeight: 600, color: '#ffffff' }}>Game {set.set_number}</td>
+                      <td style={{ padding: '6px 10px', textAlign: 'center', fontSize: 14, fontWeight: 700, fontFamily: 'var(--font-mono)', color: '#ffffff' }}>{set.player1_score}</td>
+                      <td style={{ padding: '6px 10px', textAlign: 'center', fontSize: 14, fontWeight: 700, fontFamily: 'var(--font-mono)', color: '#ffffff' }}>{set.player2_score}</td>
+                      <td style={{ padding: '6px 10px', color: 'var(--score-win)', fontWeight: 600, fontSize: 12 }}>
+                        {set.winner_id === match.player1_id ? match.player1_name : set.winner_id === match.player2_id ? match.player2_name : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, marginTop: 14, justifyContent: 'flex-end', flexWrap: 'wrap' }} className="no-print">
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={() => window.print()}
+                style={{
+                  background: '#1a1d24',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  color: '#ffffff',
+                  padding: '8px 14px',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="6 9 6 2 18 2 18 9" />
+                  <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+                  <rect x="6" y="14" width="12" height="8" />
+                </svg>
+                Print Page
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                onClick={handleDownloadScoreSheetPdf}
+                style={{
+                  background: '#1a1d24',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  color: '#ffffff',
+                  padding: '8px 14px',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+                  <polyline points="14 2 14 8 20 8" />
+                </svg>
+                Export Scoresheet (PDF)
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => setShareModalOpen(true)}
+                style={{
+                  background: 'linear-gradient(135deg, var(--accent), #3b82f6)',
+                  border: 'none',
+                  color: '#ffffff',
+                  padding: '8px 14px',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  boxShadow: '0 4px 12px rgba(139,92,246,0.25)',
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="18" cy="5" r="3" />
+                  <circle cx="6" cy="12" r="3" />
+                  <circle cx="18" cy="19" r="3" />
+                  <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                  <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+                </svg>
+                Share Scoresheet
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* Match Complete Celebration */}
-      {state.isMatchComplete && (
-        <div className="glass-card animate-slide-up" style={{
-          padding: 32,
-          textAlign: 'center',
-          marginTop: 20,
-          border: '1px solid rgba(34, 197, 94, 0.3)',
-          background: 'rgba(34, 197, 94, 0.05)',
-        }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>🏆</div>
-          <h2 style={{ fontSize: 24, fontWeight: 700, marginBottom: 8 }}>Match Complete!</h2>
-          <p style={{ fontSize: 18, color: 'var(--score-win)', fontWeight: 600 }}>
-            {state.matchWinnerId === match.player1_id ? match.player1_name : match.player2_name} wins!
-          </p>
-          <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginTop: 8 }}>
-            {state.player1SetsWon} - {state.player2SetsWon} in sets
-          </p>
-          <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 8 }}>
-            Duration: {formatTime(matchElapsed)} (Play: {formatTime(Math.max(0, playTime))}, Paused: {formatTime(totalPausedTime)})
-          </p>
+      {/* ═══════════ SETTINGS MODAL ═══════════ */}
+      {settingsOpen && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 3000, padding: 20
+        }} className="no-print">
+          <div className="glass-card animate-slide-up" style={{ width: '100%', maxWidth: 420, padding: 24 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>⚙️ Settings</h3>
+              <button className="btn btn-ghost btn-icon" onClick={() => setSettingsOpen(false)} style={{ width: 28, height: 28 }}>❌</button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 20 }}>
+              <div className="input-group">
+                <label className="input-label">Game Target Points</label>
+                <select className="input" value={targetPoints} onChange={e => {
+                  const pts = parseInt(e.target.value);
+                  setTargetPoints(pts);
+                  setMaxCapPoints(pts === 21 ? 30 : pts === 15 ? 21 : 15);
+                }}>
+                  <option value="21">21 Points (Standard BWF)</option>
+                  <option value="15">15 Points (Operational)</option>
+                  <option value="11">11 Points (Short)</option>
+                </select>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                  Changes target for the current active game
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>Play sound on score</span>
+                <input type="checkbox" checked={soundEnabled} onChange={e => setSoundEnabled(e.target.checked)} style={{ width: 18, height: 18, cursor: 'pointer' }} />
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>Vibrate on score</span>
+                <input type="checkbox" checked={vibrateEnabled} onChange={e => setVibrateEnabled(e.target.checked)} style={{ width: 18, height: 18, cursor: 'pointer' }} />
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>Keep screen ON</span>
+                <input type="checkbox" defaultChecked style={{ width: 18, height: 18, cursor: 'pointer' }} onChange={(e) => {
+                  if (e.target.checked && 'wakeLock' in navigator) {
+                    (navigator as any).wakeLock.request('screen').catch(() => {});
+                  }
+                }} />
+              </div>
+            </div>
+
+            <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => setSettingsOpen(false)}>
+              Apply
+            </button>
+          </div>
         </div>
       )}
+
+      {/* ═══════════ DECLARE WINNER MODAL ═══════════ */}
+      {declareWinnerOpen && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 3000, padding: 20
+        }} className="no-print">
+          <div className="glass-card animate-slide-up" style={{
+            width: '100%',
+            maxWidth: 420,
+            padding: 24,
+            textAlign: 'center',
+            background: '#0d0e12',
+            border: '1px solid rgba(255,255,255,0.08)',
+            color: '#ffffff',
+            boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6)'
+          }}>
+            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8, color: '#f59e0b', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+                <polyline points="22 4 12 14.01 9 11.01" />
+              </svg>
+              Finish Match Early
+            </h3>
+            <p style={{ fontSize: 13, color: '#94a3b8', marginBottom: 20 }}>
+              Select the competitor to declare as the official winner of this match. This will end the match immediately and record the current scores.
+            </p>
+
+            <div style={{
+              background: 'rgba(245, 158, 11, 0.1)',
+              border: '1px solid rgba(245, 158, 11, 0.25)',
+              borderRadius: 8,
+              padding: '12px',
+              marginBottom: 16,
+              textAlign: 'left'
+            }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#f59e0b', marginBottom: 6 }}>
+                Reason for Early Conclusion:
+              </label>
+              <select
+                value={earlyConcludeReason}
+                onChange={e => setEarlyConcludeReason(e.target.value)}
+                style={{
+                  width: '100%',
+                  background: '#1a1d24',
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  color: '#ffffff',
+                  borderRadius: 6,
+                  padding: '8px 10px',
+                  fontSize: 13,
+                  outline: 'none',
+                  marginBottom: earlyConcludeReason === 'Other' ? 8 : 0,
+                }}
+              >
+                <option value="Retirement / Medical Injury">Retirement / Medical Injury</option>
+                <option value="Walkover / Opponent Forfeit">Walkover / Opponent Forfeit</option>
+                <option value="Disqualification / Code Violation">Disqualification / Code Violation</option>
+                <option value="Adverse Conditions / Weather / Venue Issue">Adverse Conditions / Weather / Venue Issue</option>
+                <option value="Match Time Curfew / Official Decision">Match Time Curfew / Official Decision</option>
+                <option value="Mutual Agreement">Mutual Agreement</option>
+                <option value="Other">Other (Please specify)</option>
+              </select>
+
+              {earlyConcludeReason === 'Other' && (
+                <input
+                  type="text"
+                  placeholder="Enter specific reason..."
+                  value={customEarlyConcludeReason}
+                  onChange={e => setCustomEarlyConcludeReason(e.target.value)}
+                  style={{
+                    width: '100%',
+                    background: '#1a1d24',
+                    border: '1px solid rgba(255,255,255,0.15)',
+                    color: '#ffffff',
+                    borderRadius: 6,
+                    padding: '8px 10px',
+                    fontSize: 13,
+                    outline: 'none',
+                  }}
+                />
+              )}
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 16 }}>
+              <button
+                onClick={() => {
+                  const effectiveReason = earlyConcludeReason === 'Other'
+                    ? (customEarlyConcludeReason.trim() || 'Other')
+                    : earlyConcludeReason;
+                  handleDeclareWinner(match.player1_id, effectiveReason);
+                  setDeclareWinnerOpen(false);
+                }}
+                style={{
+                  width: '100%',
+                  padding: '12px 20px',
+                  fontWeight: 600,
+                  fontSize: 14,
+                  background: '#1a1d24',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  color: '#ffffff',
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  transition: 'background 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = '#252936'}
+                onMouseLeave={e => e.currentTarget.style.background = '#1a1d24'}
+              >
+                🏆 Declare {match.player1_name} Winner
+              </button>
+              <button
+                onClick={() => {
+                  const effectiveReason = earlyConcludeReason === 'Other'
+                    ? (customEarlyConcludeReason.trim() || 'Other')
+                    : earlyConcludeReason;
+                  handleDeclareWinner(match.player2_id, effectiveReason);
+                  setDeclareWinnerOpen(false);
+                }}
+                style={{
+                  width: '100%',
+                  padding: '12px 20px',
+                  fontWeight: 600,
+                  fontSize: 14,
+                  background: '#1a1d24',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  color: '#ffffff',
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  transition: 'background 0.2s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = '#252936'}
+                onMouseLeave={e => e.currentTarget.style.background = '#1a1d24'}
+              >
+                🏆 Declare {match.player2_name} Winner
+              </button>
+            </div>
+
+            <button
+              onClick={() => setDeclareWinnerOpen(false)}
+              style={{
+                width: '100%',
+                padding: '10px 14px',
+                background: 'transparent',
+                border: 'none',
+                color: '#94a3b8',
+                cursor: 'pointer',
+                fontSize: 13,
+                fontWeight: 600,
+                marginTop: 8,
+                transition: 'color 0.2s',
+              }}
+              onMouseEnter={e => e.currentTarget.style.color = '#ffffff'}
+              onMouseLeave={e => e.currentTarget.style.color = '#94a3b8'}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════════ SHARE SCORE SHEET MODAL ═══════════ */}
+      {shareModalOpen && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 3000, padding: 20
+        }} className="no-print">
+          <div className="glass-card animate-slide-up" style={{
+            width: '100%',
+            maxWidth: 460,
+            padding: 24,
+            background: '#0d0e12',
+            border: '1px solid rgba(255,255,255,0.08)',
+            color: '#ffffff',
+            boxShadow: '0 20px 50px rgba(0, 0, 0, 0.6)'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 700, margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="18" cy="5" r="3" />
+                  <circle cx="6" cy="12" r="3" />
+                  <circle cx="18" cy="19" r="3" />
+                  <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                  <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+                </svg>
+                Share Pointwise Score Log
+              </h3>
+              <button
+                onClick={() => setShareModalOpen(false)}
+                style={{
+                  width: 28,
+                  height: 28,
+                  background: 'transparent',
+                  border: 'none',
+                  color: '#94a3b8',
+                  fontSize: 16,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+                onMouseEnter={e => e.currentTarget.style.color = '#ffffff'}
+                onMouseLeave={e => e.currentTarget.style.color = '#94a3b8'}
+              >
+                ✕
+              </button>
+            </div>
+
+            <p style={{ fontSize: 13, color: '#94a3b8', marginBottom: 12 }}>
+              Here is the pointwise score progression for the match. You can copy the text summary or share it directly.
+            </p>
+
+            {/* Scrollable list of pointwise logs */}
+            <div style={{
+              maxHeight: 250,
+              overflowY: 'auto',
+              background: '#11131e',
+              border: '1px solid rgba(255,255,255,0.08)',
+              borderRadius: 8,
+              padding: 12,
+              marginBottom: 20,
+              fontSize: 12,
+              fontFamily: 'monospace'
+            }}>
+              {(() => {
+                const grouped = pointsHistory.reduce((acc, ph) => {
+                  const s = ph.setNumber || 1;
+                  if (!acc[s]) acc[s] = [];
+                  acc[s].push(ph);
+                  return acc;
+                }, {} as Record<number, typeof pointsHistory>);
+
+                const setKeys = Object.keys(grouped).map(Number).sort((a, b) => a - b);
+                
+                if (setKeys.length === 0) {
+                  return <div style={{ color: '#94a3b8', textAlign: 'center', padding: 12 }}>No points scored yet</div>;
+                }
+
+                return setKeys.map(sNum => {
+                  const pts = grouped[sNum];
+                  return (
+                    <div key={sNum} style={{ marginBottom: 14 }}>
+                      <div style={{ fontWeight: 700, color: 'var(--accent)', marginBottom: 6, borderBottom: '1px dashed rgba(255,255,255,0.08)', paddingBottom: 2 }}>
+                        GAME {sNum}
+                      </div>
+                      {pts.map((pt, idx) => {
+                        const isP1 = pt.scorer === 'player1';
+                        const scorerName = isP1 ? match.player1_name.split(' ')[0] : match.player2_name.split(' ')[0];
+                        return (
+                          <div key={idx} style={{ padding: '2px 0', display: 'flex', justifyContent: 'space-between', color: isP1 ? '#60a5fa' : '#f87171' }}>
+                            <span>Pt {idx + 1}: {scorerName} scored</span>
+                            <span style={{ fontWeight: 700, color: '#ffffff' }}>({pt.p1Score} - {pt.p2Score})</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                style={{
+                  flex: 1,
+                  padding: '10px 16px',
+                  fontWeight: 600,
+                  fontSize: 13,
+                  background: 'linear-gradient(135deg, var(--accent), #3b82f6)',
+                  border: 'none',
+                  color: '#ffffff',
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 6,
+                  boxShadow: '0 4px 12px rgba(139,92,246,0.25)',
+                }}
+                onClick={() => {
+                  // Build textual summary
+                  const grouped = pointsHistory.reduce((acc, ph) => {
+                    const s = ph.setNumber || 1;
+                    if (!acc[s]) acc[s] = [];
+                    acc[s].push(ph);
+                    return acc;
+                  }, {} as Record<number, typeof pointsHistory>);
+
+                  const setKeys = Object.keys(grouped).map(Number).sort((a, b) => a - b);
+                  let textLog = `Match Score Log: ${match.player1_name} vs ${match.player2_name}\n`;
+                  textLog += `Status: ${state.isMatchComplete ? 'Completed' : 'In Progress'}\n\n`;
+
+                  setKeys.forEach(sNum => {
+                    textLog += `--- GAME ${sNum} ---\n`;
+                    grouped[sNum].forEach((pt, idx) => {
+                      const scorerName = pt.scorer === 'player1' ? match.player1_name : match.player2_name;
+                      textLog += `Point ${idx + 1}: ${scorerName} (${pt.p1Score}-${pt.p2Score})\n`;
+                    });
+                    textLog += `\n`;
+                  });
+
+                  navigator.clipboard.writeText(textLog);
+                  alert("Score sheet text log copied to clipboard! 📋");
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <rect width="8" height="4" x="8" y="2" rx="1" ry="1" />
+                  <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                </svg>
+                Copy Text Summary
+              </button>
+              
+              {typeof navigator !== 'undefined' && navigator.share && (
+                <button
+                  style={{
+                    flex: 1,
+                    padding: '10px 16px',
+                    fontWeight: 600,
+                    fontSize: 13,
+                    background: '#1a1d24',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    color: '#ffffff',
+                    borderRadius: 8,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                    transition: 'background 0.2s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#252936'}
+                  onMouseLeave={e => e.currentTarget.style.background = '#1a1d24'}
+                  onClick={() => {
+                    const textLog = `${match.player1_name} vs ${match.player2_name} score sheet`;
+                    navigator.share({
+                      title: 'MatchPoint Score Sheet',
+                      text: textLog,
+                      url: window.location.href
+                    }).catch(() => {});
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="18" cy="5" r="3" />
+                    <circle cx="6" cy="12" r="3" />
+                    <circle cx="18" cy="19" r="3" />
+                    <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                    <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+                  </svg>
+                  Share via Device
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMediaModal && (
+        <MatchMediaModal 
+          match={match} 
+          onClose={() => setShowMediaModal(false)} 
+        />
+      )}
+    </div>
+  );
+}
+
+function ScoreProgressionGraph({ history }: { history: { p1Score: number; p2Score: number; scorer: 'player1' | 'player2' }[] }) {
+  if (history.length === 0) return null;
+  
+  const width = 500;
+  const height = 220;
+  const padding = 35;
+  
+  const maxScore = Math.max(
+    ...history.map(h => Math.max(h.p1Score, h.p2Score)),
+    11
+  );
+  
+  const pointsCount = history.length;
+  
+  const getX = (idx: number) => padding + (idx / pointsCount) * (width - 2 * padding);
+  const getY = (score: number) => height - padding - (score / maxScore) * (height - 2 * padding);
+  
+  let p1Path = `M ${getX(0)} ${getY(0)}`;
+  let p2Path = `M ${getX(0)} ${getY(0)}`;
+  
+  history.forEach((h, idx) => {
+    p1Path += ` L ${getX(idx + 1)} ${getY(h.p1Score)}`;
+    p2Path += ` L ${getX(idx + 1)} ${getY(h.p2Score)}`;
+  });
+  
+  return (
+    <div style={{ marginTop: 24, textAlign: 'left' }}>
+      <h4 style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, color: 'var(--text-primary)' }}>
+        📈 Score Progression Timeline Graph
+      </h4>
+      <div style={{
+        background: 'rgba(0,0,0,0.2)', padding: 12,
+        borderRadius: 8, border: '1px solid var(--border)',
+        display: 'flex', justifyContent: 'center'
+      }}>
+        <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} style={{ overflow: 'visible' }}>
+          {/* Grid lines */}
+          {[0, 0.25, 0.5, 0.75, 1].map((ratio, idx) => {
+            const val = Math.round(ratio * maxScore);
+            const y = getY(val);
+            return (
+              <g key={idx}>
+                <line x1={padding} y1={y} x2={width - padding} y2={y} stroke="var(--border)" strokeWidth="0.5" strokeDasharray="3 3" />
+                <text x={padding - 8} y={y + 4} fill="var(--text-muted)" fontSize="9" textAnchor="end">{val}</text>
+              </g>
+            );
+          })}
+          
+          {/* X axis lines */}
+          {[0, 0.25, 0.5, 0.75, 1].map((ratio, idx) => {
+            const pointIdx = Math.round(ratio * pointsCount);
+            const x = getX(pointIdx);
+            return (
+              <g key={idx}>
+                <line x1={x} y1={padding} x2={x} y2={height - padding} stroke="var(--border)" strokeWidth="0.5" strokeDasharray="3 3" />
+                <text x={x} y={height - padding + 15} fill="var(--text-muted)" fontSize="9" textAnchor="middle">{pointIdx}</text>
+              </g>
+            );
+          })}
+          
+          {/* Main line paths */}
+          <path d={p1Path} fill="none" stroke="#00d2ff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+          <path d={p2Path} fill="none" stroke="#ff3860" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+          
+          {/* Legend */}
+          <g transform={`translate(${width / 2 - 120}, ${padding - 18})`}>
+            <circle cx="10" cy="10" r="5" fill="#00d2ff" />
+            <text x="22" y="14" fill="var(--text-secondary)" fontSize="10" fontWeight="600">Competitor 1</text>
+            
+            <circle cx="120" cy="10" r="5" fill="#ff3860" />
+            <text x="132" y="14" fill="var(--text-secondary)" fontSize="10" fontWeight="600">Competitor 2</text>
+          </g>
+        </svg>
+      </div>
     </div>
   );
 }

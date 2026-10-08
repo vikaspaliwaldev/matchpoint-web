@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { useRouter, usePathname } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
 import { useTheme } from '@/lib/theme-context';
+import SportSelector from '@/components/SportSelector';
+import { useSport } from '@/lib/sport-context';
 import {
   IconShuttlecock,
   IconDashboard,
@@ -16,6 +18,7 @@ import {
   IconLogout,
   IconMenu,
   IconX,
+  IconDatabase,
 } from '@/components/icons';
 
 function SunIcon({ size = 18 }: { size?: number }) {
@@ -37,19 +40,24 @@ function MoonIcon({ size = 18 }: { size?: number }) {
 }
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const { user, activeRole, logout, switchRole, needsRoleSelection, selectRole } = useAuth();
+  const { user, isLoading, activeRole, logout, switchRole, needsRoleSelection, selectRole, isProfileComplete } = useAuth();
   const { theme, toggleTheme } = useTheme();
+  const { activeSport } = useSport();
   const router = useRouter();
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   React.useEffect(() => {
-    if (!user) {
+    if (!user && !isLoading) {
       router.push('/login');
     }
-  }, [user, router]);
+  }, [user, isLoading, router]);
 
-  if (!user) return null;
+  if (!user || isLoading) return null;
+
+  // Profile completion guard — redirect to profile page if incomplete
+  const isOnProfilePage = pathname === '/dashboard/profile';
+  const showProfileGuard = !isProfileComplete && !isOnProfilePage;
 
   // If user hasn't selected a role yet, show role picker
   if (needsRoleSelection) {
@@ -73,6 +81,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 admin: { label: 'Organizer', desc: 'Manage tournaments, fixtures, and registrations', color: 'var(--accent)' },
                 player: { label: 'Player', desc: 'View matches, track results, register for events', color: 'var(--score-live)' },
                 umpire: { label: 'Umpire', desc: 'Score matches and manage live games', color: 'var(--score-point)' },
+                broadcaster: { label: 'Broadcaster', desc: 'Start your camera and stream live match feeds', color: '#f43f5e' },
+                system_admin: { label: 'System Admin', desc: 'Manage system settings, users, audit logs, and backups', color: '#a855f7' },
               };
               const info = roleInfo[role];
               return (
@@ -109,32 +119,61 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   const currentRole = activeRole || user.role;
 
+  const systemAdminLinks = [
+    { href: '/dashboard', label: 'Dashboard', icon: <IconDashboard size={18} /> },
+    { href: '/dashboard/users', label: 'User Management', icon: <IconUsers size={18} /> },
+    { href: '/dashboard/payments', label: 'Payments & Reports', icon: <IconClipboard size={18} /> },
+    { href: '/dashboard/audit-logs', label: 'Audit Logs', icon: <IconClipboard size={18} /> },
+    { href: '/dashboard/backup-restore', label: 'Backup & Restore', icon: <IconDatabase size={18} /> },
+    { href: '/dashboard/login-management', label: 'Login Management', icon: <IconActivity size={18} /> },
+    { href: '/dashboard/profile', label: 'My Profile', icon: <IconUsers size={18} /> },
+  ];
+
   const adminLinks = [
     { href: '/dashboard', label: 'Dashboard', icon: <IconDashboard size={18} /> },
-    { href: '/dashboard/tournaments', label: 'Tournaments', icon: <IconTrophy size={18} /> },
+    { href: '/dashboard/tournaments', label: 'Tournament', icon: <IconTrophy size={18} /> },
+
     { href: '/dashboard/events', label: 'All Events', icon: <IconClipboard size={18} /> },
     { href: '/dashboard/registrations', label: 'Registrations', icon: <IconClipboard size={18} /> },
+    { href: '/dashboard/payments', label: 'Payments & Reports', icon: <IconClipboard size={18} /> },
     { href: '/dashboard/fixtures', label: 'Fixtures', icon: <IconGitBranch size={18} /> },
     { href: '/dashboard/matches', label: 'Matches', icon: <IconActivity size={18} /> },
     { href: '/dashboard/teams', label: 'Teams', icon: <IconUsers size={18} /> },
     { href: '/dashboard/players', label: 'Players Directory', icon: <IconUsers size={18} /> },
-    { href: '/dashboard/audit-logs', label: 'Audit Logs', icon: <IconClipboard size={18} /> },
+    { href: '/dashboard/profile', label: 'My Profile', icon: <IconUsers size={18} /> },
   ];
 
   const playerLinks = [
     { href: '/dashboard', label: 'Dashboard', icon: <IconDashboard size={18} /> },
-    { href: '/dashboard/my-tournaments', label: 'My Tournaments', icon: <IconTrophy size={18} /> },
+    { href: '/dashboard/my-tournaments', label: 'Tournament', icon: <IconTrophy size={18} /> },
     { href: '/dashboard/my-matches', label: 'My Matches', icon: <IconActivity size={18} /> },
     { href: '/dashboard/players', label: 'Players Directory', icon: <IconUsers size={18} /> },
+    { href: '/dashboard/profile', label: 'My Profile', icon: <IconUsers size={18} /> },
   ];
 
   const umpireLinks = [
     { href: '/dashboard', label: 'Dashboard', icon: <IconDashboard size={18} /> },
     { href: '/dashboard/scoring', label: 'Live Scoring', icon: <IconActivity size={18} /> },
+    { href: '/dashboard/my-tournaments', label: 'Tournament', icon: <IconTrophy size={18} /> },
     { href: '/dashboard/players', label: 'Players Directory', icon: <IconUsers size={18} /> },
+    { href: '/dashboard/profile', label: 'My Profile', icon: <IconUsers size={18} /> },
   ];
 
-  const links = currentRole === 'admin' ? adminLinks : currentRole === 'umpire' ? umpireLinks : playerLinks;
+  const broadcasterLinks = [
+    { href: '/dashboard', label: 'Dashboard', icon: <IconDashboard size={18} /> },
+    { href: '/dashboard/broadcast', label: 'Broadcaster Studio', icon: <IconActivity size={18} /> },
+    { href: '/dashboard/profile', label: 'My Profile', icon: <IconUsers size={18} /> },
+  ];
+
+  const links = currentRole === 'system_admin'
+    ? systemAdminLinks
+    : currentRole === 'admin'
+    ? adminLinks
+    : currentRole === 'umpire'
+    ? umpireLinks
+    : currentRole === 'broadcaster'
+    ? broadcasterLinks
+    : playerLinks;
 
   const handleLogout = () => {
     logout();
@@ -142,7 +181,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg-primary)' }}>
+    <div 
+      data-active-sport={activeSport}
+      style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'transparent' }}
+    >
       {/* Top Nav */}
       <nav className="nav" style={{ height: 64 }}>
         <div style={{
@@ -164,17 +206,29 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             <Link href="/" style={{ display: 'flex', alignItems: 'center', gap: 8, textDecoration: 'none' }}>
               <div style={{
                 width: 32, height: 32,
-                background: 'linear-gradient(135deg, var(--accent), #8b5cf6)',
+                background: 'linear-gradient(135deg, var(--accent), #3b82f6)',
                 borderRadius: 'var(--radius-sm)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
+                boxShadow: '0 0 10px var(--accent-glow)',
+                transition: 'all 0.3s ease',
               }}>
-                <IconShuttlecock size={16} />
+                {activeSport === 'badminton' && <span style={{ fontSize: 16 }}>🏸</span>}
+                {activeSport === 'table_tennis' && <span style={{ fontSize: 16 }}>🏓</span>}
+                {activeSport === 'squash' && <span style={{ fontSize: 16 }}>🎾</span>}
+                {activeSport === 'tennis' && <span style={{ fontSize: 16 }}>🥎</span>}
+                {activeSport === 'volleyball' && <span style={{ fontSize: 16 }}>🏐</span>}
+                {activeSport === 'cricket' && <span style={{ fontSize: 16 }}>🏏</span>}
+                {activeSport === 'basketball' && <span style={{ fontSize: 16 }}>🏀</span>}
+                {activeSport === 'all' && <IconShuttlecock size={16} />}
               </div>
               <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>MatchPoint</span>
             </Link>
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            {/* Sport selector */}
+            <SportSelector />
+
             {/* Theme toggle */}
             <button
               className="btn btn-ghost btn-icon"
@@ -194,7 +248,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                     onClick={() => switchRole(role)}
                     style={{ fontSize: 11, padding: '4px 10px', textTransform: 'capitalize' }}
                   >
-                    {role === 'admin' ? 'Organizer' : role}
+                    {role === 'admin' ? 'Organizer' : role === 'broadcaster' ? '📡 Broadcast' : role === 'system_admin' ? 'System Admin' : role}
                   </button>
                 ))}
               </div>
@@ -208,19 +262,32 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               borderRadius: 'var(--radius-md)',
               background: 'var(--bg-elevated)',
             }}>
-              <div style={{
-                width: 28, height: 28,
-                borderRadius: '50%',
-                background: 'linear-gradient(135deg, var(--accent), #8b5cf6)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 12, fontWeight: 700, color: '#fff',
-              }}>
-                {user.name.charAt(0)}
-              </div>
+              {user.avatar ? (
+                <img
+                  src={user.avatar}
+                  alt={user.name}
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: '50%',
+                    objectFit: 'cover',
+                  }}
+                />
+              ) : (
+                <div style={{
+                  width: 28, height: 28,
+                  borderRadius: '50%',
+                  background: 'linear-gradient(135deg, var(--accent), #3b82f6)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 12, fontWeight: 700, color: '#fff',
+                }}>
+                  {user.name.charAt(0).toUpperCase()}
+                </div>
+              )}
               <div>
                 <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.2 }}>{user.name}</div>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'capitalize' }}>
-                  {currentRole === 'admin' ? 'Organizer' : currentRole}
+                  {currentRole === 'admin' ? 'Organizer' : currentRole === 'broadcaster' ? 'Broadcaster' : currentRole === 'system_admin' ? 'System Admin' : currentRole}
                 </div>
               </div>
             </div>
@@ -252,7 +319,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
           <div className="divider" />
           <div className="sidebar-section">Quick Links</div>
-          <Link href="/tournament/mumbai-open-2025" className="sidebar-link">
+          <Link href="/tournament?slug=mumbai-open-2025" className="sidebar-link">
             <IconUsers size={18} />
             Public Page
           </Link>
@@ -260,7 +327,43 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
         {/* Main Content */}
         <main style={{ flex: 1, padding: 28, overflowY: 'auto', maxHeight: 'calc(100vh - 64px)' }}>
-          {children}
+          {showProfileGuard ? (
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              minHeight: 'calc(100vh - 200px)',
+            }}>
+              <div className="glass-card animate-slide-up" style={{
+                padding: 40,
+                maxWidth: 480,
+                textAlign: 'center',
+              }}>
+                <div style={{
+                  width: 72, height: 72,
+                  borderRadius: '50%',
+                  background: 'linear-gradient(135deg, #f59e0b, #ef4444)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  margin: '0 auto 20px',
+                  fontSize: 32,
+                }}>
+                  👤
+                </div>
+                <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>Complete Your Profile</h2>
+                <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 24, lineHeight: 1.6 }}>
+                  Please fill in your <strong>date of birth</strong>, <strong>phone number</strong>, and <strong>gender</strong> to access the dashboard.
+                  This information is required for tournament eligibility and communication.
+                </p>
+                <Link href="/dashboard/profile" className="btn btn-primary btn-lg" style={{ width: '100%' }}>
+                  Complete Profile →
+                </Link>
+              </div>
+            </div>
+          ) : ['cricket', 'basketball'].includes(activeSport) ? (
+            <UnimplementedSportPlaceholder sport={activeSport} />
+          ) : (
+            children
+          )}
         </main>
       </div>
 
@@ -277,6 +380,79 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           }
         }
       `}</style>
+    </div>
+  );
+}
+
+function UnimplementedSportPlaceholder({ sport }: { sport: string }) {
+  const { setActiveSport } = useSport();
+  
+  const sportNames: Record<string, string> = {
+    tennis: 'Tennis',
+    volleyball: 'Volleyball',
+    cricket: 'Cricket',
+    basketball: 'Basketball'
+  };
+
+  const sportEmojis: Record<string, string> = {
+    tennis: '🥎',
+    volleyball: '🏐',
+    cricket: '🏏',
+    basketball: '🏀'
+  };
+
+  const name = sportNames[sport] || 'Upcoming Sport';
+  const emoji = sportEmojis[sport] || '🏆';
+
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: 'calc(100vh - 120px)',
+    }}>
+      <div className="glass-card animate-slide-up" style={{
+        padding: 40,
+        maxWidth: 500,
+        textAlign: 'center',
+        border: '1px solid var(--border-accent)',
+        boxShadow: '0 10px 40px var(--accent-glow)'
+      }}>
+        <div style={{
+          width: 80, height: 80,
+          borderRadius: '50%',
+          background: 'linear-gradient(135deg, var(--accent), #3b82f6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          margin: '0 auto 24px',
+          fontSize: 36,
+          boxShadow: '0 0 20px var(--accent-glow)'
+        }}>
+          {emoji}
+        </div>
+        <span className="badge badge-accent" style={{ marginBottom: 12, fontSize: 10 }}>Upcoming Feature</span>
+        <h2 style={{ fontSize: 24, fontWeight: 700, marginBottom: 8, color: 'var(--text-primary)' }}>
+          {name} Support Under Progress
+        </h2>
+        <p style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 28, lineHeight: 1.6 }}>
+          We are currently working on integrating custom scoring strategies, court configurations, and rule sheets for <strong>{name}</strong>. Tournament management and live scoring will be available soon!
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <button 
+            className="btn btn-primary" 
+            onClick={() => setActiveSport('badminton')}
+            style={{ width: '100%' }}
+          >
+            Switch to Badminton (Live) 🏸
+          </button>
+          <button 
+            className="btn btn-secondary" 
+            onClick={() => setActiveSport('all')}
+            style={{ width: '100%' }}
+          >
+            Browse All Sports 🌍
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

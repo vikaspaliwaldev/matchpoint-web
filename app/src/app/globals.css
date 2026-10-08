@@ -20,10 +20,10 @@
   --text-inverse: #0b0e17;
   
   /* Brand accent */
-  --accent: #6366f1;
-  --accent-hover: #818cf8;
-  --accent-glow: rgba(99, 102, 241, 0.25);
-  --accent-subtle: rgba(99, 102, 241, 0.1);
+  --accent: #2563eb;
+  --accent-hover: #3b82f6;
+  --accent-glow: rgba(37, 99, 235, 0.25);
+  --accent-subtle: rgba(37, 99, 235, 0.1);
   
   /* Scoring Colors */
   --score-live: #22c55e;
@@ -47,7 +47,7 @@
   /* Borders */
   --border: rgba(255, 255, 255, 0.06);
   --border-hover: rgba(255, 255, 255, 0.12);
-  --border-accent: rgba(99, 102, 241, 0.3);
+  --border-accent: rgba(37, 99, 235, 0.3);
   
   /* Radius */
   --radius-sm: 6px;
@@ -64,6 +64,8 @@
   --background: var(--bg-primary);
   --foreground: var(--text-primary);
   --bg-nav: rgba(11, 14, 23, 0.85);
+  --bg-nav-start: rgba(11, 14, 23, 0.85);
+  --bg-nav-end: rgba(11, 14, 23, 0.85);
 }
 
 /* ========== LIGHT THEME ========== */
@@ -84,14 +86,14 @@
   --text-muted: #94a3b8;
   --text-inverse: #f1f5f9;
 
-  --accent: #4f46e5;
-  --accent-hover: #6366f1;
-  --accent-glow: rgba(79, 70, 229, 0.15);
-  --accent-subtle: rgba(79, 70, 229, 0.08);
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-glow: rgba(37, 99, 235, 0.2);
+  --accent-subtle: rgba(37, 99, 235, 0.08);
 
   --border: rgba(0, 0, 0, 0.08);
   --border-hover: rgba(0, 0, 0, 0.15);
-  --border-accent: rgba(79, 70, 229, 0.3);
+  --border-accent: rgba(37, 99, 235, 0.3);
 
   --score-live: #16a34a;
   --score-live-glow: rgba(22, 163, 74, 0.2);
@@ -99,6 +101,8 @@
   --score-loss: #dc2626;
   --score-point: #d97706;
   --bg-nav: rgba(255, 255, 255, 0.85);
+  --bg-nav-start: rgba(255, 255, 255, 0.85);
+  --bg-nav-end: rgba(255, 255, 255, 0.85);
 }
 
 @theme inline {
@@ -146,6 +150,10 @@ body {
   border-color: var(--border-hover);
   transform: translateY(-2px);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="light"] .glass-card:hover {
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
 }
 
 /* ========== BUTTONS ========== */
@@ -407,13 +415,14 @@ textarea.input {
 /* ========== NAVIGATION ========== */
 
 .nav {
-  background: var(--bg-nav);
+  background: linear-gradient(135deg, var(--bg-nav-start), var(--bg-nav-end));
   backdrop-filter: blur(20px) saturate(180%);
   -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 40;
+  transition: background 0.4s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .nav-link {
@@ -627,8 +636,8 @@ tr:hover td {
 /* ========== HERO GRADIENT ========== */
 
 .hero-gradient {
-  background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
-              radial-gradient(ellipse 60% 40% at 80% 20%, rgba(139, 92, 246, 0.1) 0%, transparent 50%),
+  background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(37, 99, 235, 0.12) 0%, transparent 50%),
+              radial-gradient(ellipse 60% 40% at 80% 20%, rgba(59, 130, 246, 0.08) 0%, transparent 50%),
               var(--bg-primary);
 }
 
@@ -743,3 +752,277 @@ tr:hover td {
   border: 1px solid rgba(239, 68, 68, 0.3);
   color: #ef4444;
 }
+
+@keyframes serveFlow {
+  from {
+    stroke-dashoffset: 20;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(1.12); }
+}
+
+/* Sport-specific watermark backgrounds removed for a cleaner UI */
+
+/* Custom premium SportSelector styling */
+.sport-select-container {
+  position: relative;
+  user-select: none;
+}
+
+.sport-select-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 16px;
+  cursor: pointer;
+  outline: none;
+  transition: all var(--transition-fast);
+  box-shadow: var(--glass-shadow);
+}
+
+.sport-select-trigger:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 15px var(--accent-glow);
+}
+
+.sport-select-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 180px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-hover);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+  padding: 6px;
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: slide-in-up 0.2s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.sport-select-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  background: transparent;
+  border: none;
+  text-align: left;
+  width: 100%;
+}
+
+.sport-select-option:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+
+.sport-select-option.active {
+  color: #ffffff;
+  background: var(--accent);
+  font-weight: 600;
+}
+
+/* ============================================================ */
+/* ========== UNIFIED SPORT THEME (DARK/DEFAULT) ========== */
+/* ============================================================ */
+
+[data-active-sport] {
+  --bg-primary: #060a12;
+  --bg-secondary: #0a0f1c;
+  --bg-card: #0f1527;
+  --bg-elevated: #151e36;
+  --bg-nav: #0f1527;
+  --border: rgba(59, 130, 246, 0.08);
+  --border-hover: rgba(59, 130, 246, 0.15);
+  --accent: #2563eb;
+  --accent-hover: #3b82f6;
+  --accent-glow: rgba(37, 99, 235, 0.25);
+  --accent-subtle: rgba(37, 99, 235, 0.1);
+  --bg-nav-start: rgba(15, 21, 39, 0.95);
+  --bg-nav-end: rgba(23, 33, 61, 0.95);
+}
+
+/* ============================================================ */
+/* ========== UNIFIED SPORT THEME (LIGHT MODE) ========== */
+/* ============================================================ */
+
+[data-theme="light"] [data-active-sport],
+[data-theme="light"][data-active-sport] {
+  --bg-primary: #f0f9ff;
+  --bg-secondary: #e0f2fe;
+  --bg-card: #ffffff;
+  --bg-elevated: #bae6fd;
+  --bg-nav: transparent;
+  --border: rgba(59, 130, 246, 0.12);
+  --border-hover: rgba(59, 130, 246, 0.2);
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-glow: rgba(37, 99, 235, 0.2);
+  --accent-subtle: rgba(37, 99, 235, 0.08);
+  --bg-nav-start: rgba(224, 242, 254, 0.9);
+  --bg-nav-end: rgba(186, 230, 253, 0.9);
+}
+
+/* ============================================================ */
+/* ========== FULLSCREEN SCORECARD SYSTEM ========== */
+/* ============================================================ */
+
+.fullscreen-scorecard {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  height: 100dvh !important;
+  z-index: 9999 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  background: var(--bg-card) !important;
+}
+
+/* Hide win probability in ALL fullscreen orientations */
+.fullscreen-winprobability {
+  display: none !important;
+}
+
+@media (orientation: portrait) {
+  .fullscreen-scorecard {
+    padding: 6px 8px !important;
+    gap: 4px !important;
+  }
+  .fullscreen-header {
+    margin-bottom: 0 !important;
+    padding: 6px 10px !important;
+  }
+  .fullscreen-header span,
+  .fullscreen-header div {
+    font-size: inherit;
+  }
+  .fullscreen-court-container {
+    flex: 1 1 0% !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+  }
+  .fullscreen-court {
+    width: 100% !important;
+    min-height: 0 !important;
+    height: 100% !important;
+    max-height: 100% !important;
+    margin: 0 !important;
+    border-width: 8px !important;
+  }
+  .fullscreen-scorebar {
+    padding: 6px 12px !important;
+    margin-bottom: 2px !important;
+  }
+  .fullscreen-controls {
+    margin-bottom: 0 !important;
+    gap: 4px !important;
+  }
+  .fullscreen-controls > button,
+  .fullscreen-controls > .btn {
+    padding: 8px 6px !important;
+    font-size: 11px !important;
+  }
+  .fullscreen-declare-winner {
+    margin-bottom: 2px !important;
+  }
+  .fullscreen-declare-winner > button {
+    padding: 8px 10px !important;
+    font-size: 12px !important;
+  }
+}
+
+@media (orientation: landscape) {
+  .fullscreen-scorecard {
+    padding: 2px 8px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: space-between !important;
+    gap: 2px !important;
+    height: 100dvh !important;
+    overflow: hidden !important;
+  }
+  .fullscreen-header {
+    margin-bottom: 0 !important;
+    padding: 2px 8px !important;
+  }
+  .fullscreen-header h2,
+  .fullscreen-header span,
+  .fullscreen-header div {
+    font-size: 11px !important;
+  }
+  .fullscreen-court-container {
+    flex: 1 1 0% !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+  }
+  .fullscreen-court {
+    height: 100% !important;
+    min-height: 0 !important;
+    max-height: 82vh !important;
+    width: auto !important;
+    aspect-ratio: 2 / 1 !important;
+    margin: 0 auto !important;
+    border-width: 4px !important;
+  }
+  .fullscreen-scorebar {
+    padding: 2px 8px !important;
+    margin-bottom: 0 !important;
+    font-size: 11px !important;
+  }
+  .fullscreen-controls {
+    margin-bottom: 0 !important;
+    gap: 2px !important;
+  }
+  .fullscreen-controls > button,
+  .fullscreen-controls > .btn {
+    padding: 4px 6px !important;
+    font-size: 10px !important;
+  }
+  .fullscreen-declare-winner {
+    margin-bottom: 0 !important;
+  }
+  .fullscreen-declare-winner > button {
+    padding: 4px 8px !important;
+    font-size: 10px !important;
+  }
+  .portrait-only {
+    display: none !important;
+  }
+}
+
+

@@ -4,15 +4,12 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://pcfwdibqnpv
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
 // Smart fallback checker:
-// If NEXT_PUBLIC_SUPABASE_ANON_KEY is empty, the service layer will run in in-memory Mock Mode.
-// The moment the user drops in their Supabase API Key, the app dynamically switches to Database Mode!
-export const isSupabaseConfigured = !!supabaseAnonKey && supabaseAnonKey !== 'your-anon-key-here';
+// Active if either Supabase or the live backend REST API (Spring Boot / Aiven) is configured.
+// When active, the frontend routes all requests through the live backend API rather than mock mode.
+export const isSupabaseConfigured = true;
 
-if (!isSupabaseConfigured) {
-  console.warn(
-    'MatchPoint: Supabase Anon Key is not configured yet. The app is running in in-memory Mock Mode. ' +
-    'Add NEXT_PUBLIC_SUPABASE_ANON_KEY to your app/.env.local to activate the Supabase backend.'
-  );
+if (!supabaseAnonKey) {
+  console.info('MatchPoint: Supabase is disabled. Running against live backend API at ' + (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'));
 }
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey || 'dummy-key-to-prevent-sdk-error');
