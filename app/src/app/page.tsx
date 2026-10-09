@@ -667,7 +667,7 @@ export default function LandingPage() {
               <div className="marquee-track">
                 {/* Tripled arrays to ensure seamless loop gap coverage */}
                 {[...filteredLiveMatches, ...filteredLiveMatches, ...filteredLiveMatches].map((match, idx) => {
-                  const currentSet = match.sets[match.sets.length - 1];
+                  const currentSet = match.sets?.find(s => !s.is_complete) || match.sets?.[match.sets.length - 1];
                   const tour = dbTournaments.find(t => t.id === match.tournament_id);
                   const ev = dbEvents.find(e => e.id === match.event_id);
                   const tourName = tour?.name || 'Tournament';
@@ -709,11 +709,15 @@ export default function LandingPage() {
                         <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>{currentSet?.player1_score ?? 0}</div>
                         <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-secondary)' }}>{currentSet?.player2_score ?? 0}</div>
                       </div>
-                      {match.sets.length > 1 && (
+                      {match.status === 'paused' ? (
+                        <div style={{ fontSize: 9, fontWeight: 800, color: '#fff', background: '#f59e0b', padding: '2px 6px', borderRadius: 4, letterSpacing: '0.04em', flexShrink: 0 }}>
+                          PAUSED
+                        </div>
+                      ) : match.sets.length > 1 ? (
                         <div style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '2px 4px', borderRadius: 'var(--radius-sm)', flexShrink: 0 }}>
                           S{match.sets.length}
                         </div>
-                      )}
+                      ) : null}
                     </Link>
                   );
                 })}

@@ -56,7 +56,7 @@ export default function MyMatchesPage() {
     return isP1 || isP2;
   });
 
-  const liveMatches = myMatches.filter(m => m.status === 'running');
+  const liveMatches = myMatches.filter(m => m.status === 'running' || m.status === 'paused');
   const upcomingMatches = myMatches.filter(m => m.status === 'scheduled');
   const completedMatches = myMatches.filter(m => m.status === 'completed');
 
@@ -68,7 +68,7 @@ export default function MyMatchesPage() {
       {liveMatches.length > 0 && (
         <div style={{ marginBottom: 28 }}>
           <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="live-dot" /> Live Now
+            <span className="live-dot" /> Live & In Progress
           </h2>
           <div style={{ display: 'grid', gap: 12 }}>
             {liveMatches.map(match => (
@@ -139,6 +139,7 @@ function MatchCard({
   const isWinner = match.winner_id === userId;
   const isLoser = match.status === 'completed' && match.winner_id !== userId;
   const isLive = match.status === 'running';
+  const isPaused = match.status === 'paused';
 
   const tournament = tournaments.find(t => t.id === match.tournament_id);
   const eventObj = events.find(e => e.id === match.event_id);
@@ -148,10 +149,15 @@ function MatchCard({
   return (
     <div className="glass-card" style={{
       padding: 16,
-      border: isLive ? '1px solid rgba(34, 197, 94, 0.3)' : isWinner ? '1px solid rgba(34, 197, 94, 0.2)' : undefined,
+      border: isPaused ? '1px solid rgba(245, 158, 11, 0.4)' : isLive ? '1px solid rgba(34, 197, 94, 0.3)' : isWinner ? '1px solid rgba(34, 197, 94, 0.2)' : undefined,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {isPaused && (
+            <span className="badge badge-paused" style={{ background: '#f59e0b', color: '#fff', fontWeight: 700 }}>
+              ⏸ Paused
+            </span>
+          )}
           {isLive && <span className="badge badge-live"><span className="live-dot" style={{ width: 5, height: 5 }} /> Live</span>}
           {isWinner && <span className="badge badge-approved"><IconTrophy size={10} /> Won</span>}
           {isLoser && <span className="badge badge-rejected">Lost</span>}

@@ -131,7 +131,7 @@ export default function OverlayPage() {
   const isPaused = match?.status === 'paused';
   const isCompleted = match?.status === 'completed';
 
-  const activeSet = match?.sets?.[match.sets.length - 1];
+  const activeSet = match?.sets?.find(s => !s.is_complete) || match?.sets?.[match.sets.length - 1];
   const p1Sets = match?.sets?.filter(s => s.is_complete && s.winner_id === match.player1_id).length || 0;
   const p2Sets = match?.sets?.filter(s => s.is_complete && s.winner_id === match.player2_id).length || 0;
 
@@ -224,6 +224,19 @@ export default function OverlayPage() {
               boxShadow: '0 0 8px rgba(239, 68, 68, 0.6)',
               animation: 'pulse 1.5s infinite',
             }} />
+          )}
+          {isPaused && (
+            <span style={{
+              fontSize: 10,
+              fontWeight: 800,
+              color: '#f59e0b',
+              background: 'rgba(245, 158, 11, 0.15)',
+              padding: '2px 6px',
+              borderRadius: 4,
+              letterSpacing: 0.5
+            }}>
+              ⏸ PAUSED
+            </span>
           )}
           <span style={{ fontSize: 14, fontWeight: 600, color: textColor }}>
             {match.player1_name.split(' ').pop()}

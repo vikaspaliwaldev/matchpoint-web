@@ -196,6 +196,80 @@ export default function VolleyballScoring({
     return initial;
   };
 
+  // Court Side Switch State (allows umpire to flip team 1 and team 2 court sides)
+  const [sidesSwapped, setSidesSwapped] = useState<boolean>(false);
+
+  // Offline / Network Resilience States
+  const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [offlinePendingCount, setOfflinePendingCount] = useState<number>(0);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'saved_locally'>('idle');
+
+  // Monitor network online/offline events
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      flushOfflineQueue();
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      setSyncStatus('offline');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    // Initial check of pending offline updates for this match in localStorage
+    try {
+      const stored = localStorage.getItem(`matchpoint_offline_score_${match.id}`);
+      if (stored) {
+        setOfflinePendingCount(1);
+        setSyncStatus('saved_locally');
+        if (navigator.onLine) {
+          flushOfflineQueue();
+        }
+      }
+    } catch {}
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [match.id]);
+
+  // Flush offline queue when network is restored
+  const flushOfflineQueue = async () => {
+    try {
+      const key = `matchpoint_offline_score_${match.id}`;
+      const payloadStr = localStorage.getItem(key);
+      if (!payloadStr) return;
+
+      setSyncStatus('syncing');
+      const payload = JSON.parse(payloadStr);
+
+      await updateMatchScore(
+        payload.matchId,
+        payload.sets,
+        payload.status,
+        payload.winnerId,
+        payload.actualStartTime,
+        payload.actualEndTime,
+        payload.court,
+        undefined,
+        payload.durationSeconds,
+        'volleyball',
+        payload.metadata
+      );
+
+      localStorage.removeItem(key);
+      setOfflinePendingCount(0);
+      setSyncStatus('idle');
+      onScoreUpdated();
+    } catch (err) {
+      console.warn('Failed to flush offline queue:', err);
+      setSyncStatus('saved_locally');
+    }
+  };
+
   const [sets, setSets] = useState<MatchSet[]>(initializeSets);
 
   // Calculate sets won
@@ -309,20 +383,55 @@ export default function VolleyballScoring({
       early_conclude_reason: earlyReason || (match.sport_metadata as any)?.early_conclude_reason,
     };
 
+    // Prepare payload
+    const payload = {
+      matchId: match.id,
+      sets: updatedSets,
+      status: finalStatus,
+      winnerId: finalWinner,
+      actualStartTime: match.actual_start_time || new Date().toISOString(),
+      actualEndTime: finalStatus === 'completed' ? new Date().toISOString() : null,
+      court: selectedCourt,
+      durationSeconds: newDuration !== undefined ? newDuration : matchElapsed,
+      metadata,
+    };
+
+    // Cache locally immediately so user NEVER loses data regardless of connection
     try {
+      localStorage.setItem(`matchpoint_offline_score_${match.id}`, JSON.stringify(payload));
+    } catch {}
+
+    // If device is explicitly offline, mark saved locally and notify UI
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setOfflinePendingCount(1);
+      setSyncStatus('saved_locally');
+      onScoreUpdated();
+      return;
+    }
+
+    try {
+      setSyncStatus('syncing');
       await updateMatchScore(
         match.id,
         updatedSets,
         finalStatus,
         finalWinner,
-        match.actual_start_time || new Date().toISOString(),
-        finalStatus === 'completed' ? new Date().toISOString() : null,
+        payload.actualStartTime,
+        payload.actualEndTime,
         selectedCourt,
         undefined,
-        newDuration !== undefined ? newDuration : matchElapsed,
+        payload.durationSeconds,
         'volleyball',
         metadata
       );
+
+      // Successfully synced to backend! Clear offline copy
+      try {
+        localStorage.removeItem(`matchpoint_offline_score_${match.id}`);
+      } catch {}
+
+      setOfflinePendingCount(0);
+      setSyncStatus('idle');
 
       if (finalStatus === 'completed' && earlyReason) {
         await logAction(
@@ -335,7 +444,11 @@ export default function VolleyballScoring({
 
       onScoreUpdated();
     } catch (err) {
-      console.error('Failed to sync Volleyball score:', err);
+      console.warn('Network slow/offline: Score saved locally on device:', err);
+      setOfflinePendingCount(1);
+      setSyncStatus('saved_locally');
+      // Still trigger onScoreUpdated so local state updates immediately
+      onScoreUpdated();
     }
   };
 
@@ -596,6 +709,59 @@ export default function VolleyballScoring({
               {isPaused ? 'PAUSED' : matchStarted && !isMatchComplete ? 'RUNNING' : 'STOPPED'}
             </span>
           </div>
+          {/* Offline / Sync Status Badge */}
+          {(!isOnline || syncStatus === 'saved_locally' || syncStatus === 'syncing') && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                background: syncStatus === 'syncing' ? 'rgba(59, 130, 246, 0.2)' : 'rgba(234, 179, 8, 0.2)',
+                border: syncStatus === 'syncing' ? '1px solid rgba(59, 130, 246, 0.4)' : '1px solid rgba(234, 179, 8, 0.4)',
+                padding: '6px 12px',
+                borderRadius: '8px',
+                fontSize: '12px',
+                fontWeight: '700',
+                color: syncStatus === 'syncing' ? '#93C5FD' : '#FDE047',
+              }}
+              title={
+                !isOnline
+                  ? 'Device is offline. Scores are safely saved locally on device and will auto-sync once connection restores.'
+                  : syncStatus === 'saved_locally'
+                  ? 'Score saved locally on device. Syncing to server...'
+                  : 'Syncing offline scores to server...'
+              }
+            >
+              <span>{syncStatus === 'syncing' ? '🔄' : '📶'}</span>
+              <span>
+                {!isOnline ? 'Offline Mode (Saved Locally)' : syncStatus === 'saved_locally' ? 'Saved Locally (Pending Sync)' : 'Syncing Score...'}
+              </span>
+            </div>
+          )}
+
+          {/* Switch Court Sides Button */}
+          <button
+            onClick={() => setSidesSwapped(prev => !prev)}
+            style={{
+              background: sidesSwapped ? 'rgba(168, 85, 247, 0.25)' : 'rgba(255, 255, 255, 0.08)',
+              border: sidesSwapped ? '1px solid rgba(168, 85, 247, 0.5)' : '1px solid rgba(255, 255, 255, 0.15)',
+              color: sidesSwapped ? '#D8B4FE' : '#E2E8F0',
+              borderRadius: '8px',
+              padding: '6px 12px',
+              fontSize: '12px',
+              fontWeight: '700',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              transition: 'all 0.2s ease',
+            }}
+            title="Switch court sides (Swap Left and Right teams on court)"
+          >
+            <span>⇄</span>
+            <span>Switch Sides</span>
+          </button>
+
           {/* Format Badge */}
           <button
             onClick={() => setShowConfigModal(true)}
@@ -899,290 +1065,313 @@ export default function VolleyballScoring({
 
           {/* Clean Volleyball Court Mat (Player position circles and numbers removed for clear unobstructed view) */}
 
-          {/* Left Half Court Surface - Team 1 Zone (Scores & Meta) */}
-          <div
-            style={{
-              position: 'absolute',
-              top: 0,
-              bottom: 0,
-              left: 0,
-              width: '50%',
-              display: 'flex',
-              flexDirection: 'column',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              padding: '12px 16px',
-              boxSizing: 'border-box',
-              zIndex: 10,
-              pointerEvents: 'none',
-            }}
-          >
-            {/* Top Bar: Team Name + Serving Badge */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', justifyContent: 'flex-start' }}>
+          {/* Left Half Court Surface - Dynamically swaps team 1 or team 2 based on sidesSwapped */}
+          {(() => {
+            const leftTeamKey: 'player1' | 'player2' = !sidesSwapped ? 'player1' : 'player2';
+            const leftName = !sidesSwapped ? match.player1_name : match.player2_name;
+            const leftScore = !sidesSwapped ? currentSet.player1_score : currentSet.player2_score;
+            const leftSetsWon = !sidesSwapped ? p1SetsWon : p2SetsWon;
+            const leftTimeouts = !sidesSwapped ? timeoutsP1 : timeoutsP2;
+            const isLeftServing = servingTeam === leftTeamKey;
+            const leftThemeColor = leftTeamKey === 'player1' ? '#2563EB' : '#10B981';
+
+            return (
               <div
                 style={{
-                  background: servingTeam === 'player1' ? '#2563EB' : 'rgba(15, 23, 42, 0.85)',
-                  color: '#FFFFFF',
-                  padding: '4px 12px',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  fontWeight: '800',
-                  letterSpacing: '0.5px',
-                  textTransform: 'uppercase',
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-                  backdropFilter: 'blur(6px)',
-                  border: '1px solid rgba(255,255,255,0.15)',
+                  position: 'absolute',
+                  top: 0,
+                  bottom: 0,
+                  left: 0,
+                  width: '50%',
                   display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'space-between',
                   alignItems: 'center',
-                  gap: 8,
+                  padding: '12px 16px',
+                  boxSizing: 'border-box',
+                  zIndex: 10,
+                  pointerEvents: 'none',
                 }}
               >
-                {getTeamLogo(match.player1_name) && (
-                  <img
-                    src={getTeamLogo(match.player1_name)!}
-                    alt={match.player1_name}
-                    style={{
-                      width: 22,
-                      height: 22,
-                      borderRadius: 4,
-                      objectFit: 'cover',
-                      border: '1px solid rgba(255,255,255,0.5)',
-                    }}
-                  />
-                )}
-                <span>{match.player1_name}</span>
-              </div>
-              {servingTeam === 'player1' && (
-                <span
-                  style={{
-                    background: '#EF4444',
-                    color: '#FFF',
-                    padding: '3px 8px',
-                    borderRadius: '6px',
-                    fontSize: '10px',
-                    fontWeight: '800',
-                    letterSpacing: '1px',
-                    boxShadow: '0 2px 8px rgba(239, 68, 68, 0.5)',
-                  }}
-                >
-                  🏐 SERVING
-                </span>
-              )}
-            </div>
-
-            {/* Giant Center Points Display */}
-            <div
-              style={{
-                fontSize: 'clamp(54px, 13vw, 115px)',
-                fontWeight: '900',
-                color: '#FFFFFF',
-                fontFamily: 'monospace',
-                textShadow: '0 6px 25px rgba(0, 0, 0, 0.75)',
-                userSelect: 'none',
-                lineHeight: 1,
-              }}
-            >
-              {currentSet.player1_score}
-            </div>
-
-            {/* Bottom Bar: Sets Won & Timeouts */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                background: 'rgba(15, 23, 42, 0.75)',
-                padding: '4px 10px',
-                borderRadius: '8px',
-                backdropFilter: 'blur(6px)',
-                border: '1px solid rgba(255,255,255,0.1)',
-              }}
-            >
-              <span style={{ fontSize: '11px', fontWeight: '700', color: '#93C5FD' }}>
-                SETS: <strong style={{ color: '#FFF', fontSize: '13px' }}>{p1SetsWon}</strong>/{setsToWin}
-              </span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto' }}>
-                <span style={{ fontSize: '10px', color: '#CBD5E1', marginRight: 2 }}>T/O:</span>
-                {[1, 2].map(num => (
+                {/* Top Bar: Team Name + Serving Badge */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', justifyContent: 'flex-start' }}>
                   <div
-                    key={num}
                     style={{
-                      width: '8px',
-                      height: '8px',
-                      borderRadius: '50%',
-                      background: num <= timeoutsP1 ? '#EF4444' : 'rgba(255,255,255,0.3)',
+                      background: isLeftServing ? leftThemeColor : 'rgba(15, 23, 42, 0.85)',
+                      color: '#FFFFFF',
+                      padding: '4px 12px',
+                      borderRadius: '8px',
+                      fontSize: '12px',
+                      fontWeight: '800',
+                      letterSpacing: '0.5px',
+                      textTransform: 'uppercase',
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+                      backdropFilter: 'blur(6px)',
+                      border: '1px solid rgba(255,255,255,0.15)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
                     }}
-                  />
-                ))}
-                <button
-                  disabled={timeoutsP1 >= 2 || !matchStarted || isMatchComplete}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleCallTimeout('player1');
-                  }}
-                  style={{
-                    marginLeft: '6px',
-                    background: 'rgba(239, 68, 68, 0.25)',
-                    border: '1px solid rgba(239, 68, 68, 0.5)',
-                    color: '#FCA5A5',
-                    borderRadius: '4px',
-                    padding: '1px 6px',
-                    fontSize: '10px',
-                    fontWeight: '700',
-                    cursor: timeoutsP1 < 2 ? 'pointer' : 'not-allowed',
-                  }}
-                >
-                  T/O
-                </button>
-              </div>
-            </div>
-          </div>
+                  >
+                    {getTeamLogo(leftName) && (
+                      <img
+                        src={getTeamLogo(leftName)!}
+                        alt={leftName}
+                        style={{
+                          width: 22,
+                          height: 22,
+                          borderRadius: 4,
+                          objectFit: 'cover',
+                          border: '1px solid rgba(255,255,255,0.5)',
+                        }}
+                      />
+                    )}
+                    <span>{leftName}</span>
+                  </div>
+                  {isLeftServing && (
+                    <span
+                      style={{
+                        background: '#EF4444',
+                        color: '#FFF',
+                        padding: '3px 8px',
+                        borderRadius: '6px',
+                        fontSize: '10px',
+                        fontWeight: '800',
+                        letterSpacing: '1px',
+                        boxShadow: '0 2px 8px rgba(239, 68, 68, 0.5)',
+                      }}
+                    >
+                      🏐 SERVING
+                    </span>
+                  )}
+                </div>
 
-          {/* Right Half Court Surface - Team 2 Zone */}
-          <div
-            style={{
-              position: 'absolute',
-              top: 0,
-              bottom: 0,
-              right: 0,
-              width: '50%',
-              display: 'flex',
-              flexDirection: 'column',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              padding: '12px 16px',
-              boxSizing: 'border-box',
-              zIndex: 10,
-              pointerEvents: 'none',
-            }}
-          >
-            {/* Top Bar: Team Name + Serving Badge */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', justifyContent: 'flex-end' }}>
-              {servingTeam === 'player2' && (
-                <span
+                {/* Giant Center Points Display */}
+                <div
                   style={{
-                    background: '#EF4444',
-                    color: '#FFF',
-                    padding: '3px 8px',
-                    borderRadius: '6px',
-                    fontSize: '10px',
-                    fontWeight: '800',
-                    letterSpacing: '1px',
-                    boxShadow: '0 2px 8px rgba(239, 68, 68, 0.5)',
+                    fontSize: 'clamp(54px, 13vw, 115px)',
+                    fontWeight: '900',
+                    color: '#FFFFFF',
+                    fontFamily: 'monospace',
+                    textShadow: '0 6px 25px rgba(0, 0, 0, 0.75)',
+                    userSelect: 'none',
+                    lineHeight: 1,
                   }}
                 >
-                  🏐 SERVING
-                </span>
-              )}
+                  {leftScore}
+                </div>
+
+                {/* Bottom Bar: Sets Won & Timeouts */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    width: '100%',
+                    background: 'rgba(15, 23, 42, 0.75)',
+                    padding: '4px 10px',
+                    borderRadius: '8px',
+                    backdropFilter: 'blur(6px)',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                  }}
+                >
+                  <span style={{ fontSize: '11px', fontWeight: '700', color: '#93C5FD' }}>
+                    SETS: <strong style={{ color: '#FFF', fontSize: '13px' }}>{leftSetsWon}</strong>/{setsToWin}
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto' }}>
+                    <span style={{ fontSize: '10px', color: '#CBD5E1', marginRight: 2 }}>T/O:</span>
+                    {[1, 2].map(num => (
+                      <div
+                        key={num}
+                        style={{
+                          width: '8px',
+                          height: '8px',
+                          borderRadius: '50%',
+                          background: num <= leftTimeouts ? '#EF4444' : 'rgba(255,255,255,0.3)',
+                        }}
+                      />
+                    ))}
+                    <button
+                      disabled={leftTimeouts >= 2 || !matchStarted || isMatchComplete}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCallTimeout(leftTeamKey);
+                      }}
+                      style={{
+                        marginLeft: '6px',
+                        background: 'rgba(239, 68, 68, 0.25)',
+                        border: '1px solid rgba(239, 68, 68, 0.5)',
+                        color: '#FCA5A5',
+                        borderRadius: '4px',
+                        padding: '1px 6px',
+                        fontSize: '10px',
+                        fontWeight: '700',
+                        cursor: leftTimeouts < 2 ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      T/O
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Right Half Court Surface - Dynamically swaps team 2 or team 1 based on sidesSwapped */}
+          {(() => {
+            const rightTeamKey: 'player1' | 'player2' = !sidesSwapped ? 'player2' : 'player1';
+            const rightName = !sidesSwapped ? match.player2_name : match.player1_name;
+            const rightScore = !sidesSwapped ? currentSet.player2_score : currentSet.player1_score;
+            const rightSetsWon = !sidesSwapped ? p2SetsWon : p1SetsWon;
+            const rightTimeouts = !sidesSwapped ? timeoutsP2 : timeoutsP1;
+            const isRightServing = servingTeam === rightTeamKey;
+            const rightThemeColor = rightTeamKey === 'player2' ? '#10B981' : '#2563EB';
+
+            return (
               <div
                 style={{
-                  background: servingTeam === 'player2' ? '#10B981' : 'rgba(15, 23, 42, 0.85)',
-                  color: '#FFFFFF',
-                  padding: '4px 12px',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  fontWeight: '800',
-                  letterSpacing: '0.5px',
-                  textTransform: 'uppercase',
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-                  backdropFilter: 'blur(6px)',
-                  border: '1px solid rgba(255,255,255,0.15)',
+                  position: 'absolute',
+                  top: 0,
+                  bottom: 0,
+                  right: 0,
+                  width: '50%',
                   display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'space-between',
                   alignItems: 'center',
-                  gap: 8,
+                  padding: '12px 16px',
+                  boxSizing: 'border-box',
+                  zIndex: 10,
+                  pointerEvents: 'none',
                 }}
               >
-                <span>{match.player2_name}</span>
-                {getTeamLogo(match.player2_name) && (
-                  <img
-                    src={getTeamLogo(match.player2_name)!}
-                    alt={match.player2_name}
+                {/* Top Bar: Team Name + Serving Badge */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', justifyContent: 'flex-end' }}>
+                  {isRightServing && (
+                    <span
+                      style={{
+                        background: '#EF4444',
+                        color: '#FFF',
+                        padding: '3px 8px',
+                        borderRadius: '6px',
+                        fontSize: '10px',
+                        fontWeight: '800',
+                        letterSpacing: '1px',
+                        boxShadow: '0 2px 8px rgba(239, 68, 68, 0.5)',
+                      }}
+                    >
+                      🏐 SERVING
+                    </span>
+                  )}
+                  <div
                     style={{
-                      width: 22,
-                      height: 22,
-                      borderRadius: 4,
-                      objectFit: 'cover',
-                      border: '1px solid rgba(255,255,255,0.5)',
+                      background: isRightServing ? rightThemeColor : 'rgba(15, 23, 42, 0.85)',
+                      color: '#FFFFFF',
+                      padding: '4px 12px',
+                      borderRadius: '8px',
+                      fontSize: '12px',
+                      fontWeight: '800',
+                      letterSpacing: '0.5px',
+                      textTransform: 'uppercase',
+                      boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+                      backdropFilter: 'blur(6px)',
+                      border: '1px solid rgba(255,255,255,0.15)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
                     }}
-                  />
-                )}
-              </div>
-            </div>
+                  >
+                    <span>{rightName}</span>
+                    {getTeamLogo(rightName) && (
+                      <img
+                        src={getTeamLogo(rightName)!}
+                        alt={rightName}
+                        style={{
+                          width: 22,
+                          height: 22,
+                          borderRadius: 4,
+                          objectFit: 'cover',
+                          border: '1px solid rgba(255,255,255,0.5)',
+                        }}
+                      />
+                    )}
+                  </div>
+                </div>
 
-            {/* Giant Center Points Display */}
-            <div
-              style={{
-                fontSize: 'clamp(54px, 13vw, 115px)',
-                fontWeight: '900',
-                color: '#FFFFFF',
-                fontFamily: 'monospace',
-                textShadow: '0 6px 25px rgba(0, 0, 0, 0.75)',
-                userSelect: 'none',
-                lineHeight: 1,
-              }}
-            >
-              {currentSet.player2_score}
-            </div>
-
-            {/* Bottom Bar: Sets Won & Timeouts */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                width: '100%',
-                background: 'rgba(15, 23, 42, 0.75)',
-                padding: '4px 10px',
-                borderRadius: '8px',
-                backdropFilter: 'blur(6px)',
-                border: '1px solid rgba(255,255,255,0.1)',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto' }}>
-                <button
-                  disabled={timeoutsP2 >= 2 || !matchStarted || isMatchComplete}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleCallTimeout('player2');
-                  }}
+                {/* Giant Center Points Display */}
+                <div
                   style={{
-                    marginRight: '6px',
-                    background: 'rgba(239, 68, 68, 0.25)',
-                    border: '1px solid rgba(239, 68, 68, 0.5)',
-                    color: '#FCA5A5',
-                    borderRadius: '4px',
-                    padding: '1px 6px',
-                    fontSize: '10px',
-                    fontWeight: '700',
-                    cursor: timeoutsP2 < 2 ? 'pointer' : 'not-allowed',
+                    fontSize: 'clamp(54px, 13vw, 115px)',
+                    fontWeight: '900',
+                    color: '#FFFFFF',
+                    fontFamily: 'monospace',
+                    textShadow: '0 6px 25px rgba(0, 0, 0, 0.75)',
+                    userSelect: 'none',
+                    lineHeight: 1,
                   }}
                 >
-                  T/O
-                </button>
-                <span style={{ fontSize: '10px', color: '#CBD5E1' }}>T/O:</span>
-                {[1, 2].map(num => (
-                  <div
-                    key={num}
-                    style={{
-                      width: '8px',
-                      height: '8px',
-                      borderRadius: '50%',
-                      background: num <= timeoutsP2 ? '#EF4444' : 'rgba(255,255,255,0.3)',
-                    }}
-                  />
-                ))}
-              </div>
-              <span style={{ fontSize: '11px', fontWeight: '700', color: '#93C5FD' }}>
-                SETS: <strong style={{ color: '#FFF', fontSize: '13px' }}>{p2SetsWon}</strong>/{setsToWin}
-              </span>
-            </div>
-          </div>
+                  {rightScore}
+                </div>
 
+                {/* Bottom Bar: Sets Won & Timeouts */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    width: '100%',
+                    background: 'rgba(15, 23, 42, 0.75)',
+                    padding: '4px 10px',
+                    borderRadius: '8px',
+                    backdropFilter: 'blur(6px)',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto' }}>
+                    <button
+                      disabled={rightTimeouts >= 2 || !matchStarted || isMatchComplete}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCallTimeout(rightTeamKey);
+                      }}
+                      style={{
+                        marginRight: '6px',
+                        background: 'rgba(239, 68, 68, 0.25)',
+                        border: '1px solid rgba(239, 68, 68, 0.5)',
+                        color: '#FCA5A5',
+                        borderRadius: '4px',
+                        padding: '1px 6px',
+                        fontSize: '10px',
+                        fontWeight: '700',
+                        cursor: rightTimeouts < 2 ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      T/O
+                    </button>
+                    <span style={{ fontSize: '10px', color: '#CBD5E1' }}>T/O:</span>
+                    {[1, 2].map(num => (
+                      <div
+                        key={num}
+                        style={{
+                          width: '8px',
+                          height: '8px',
+                          borderRadius: '50%',
+                          background: num <= rightTimeouts ? '#EF4444' : 'rgba(255,255,255,0.3)',
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <span style={{ fontSize: '11px', fontWeight: '700', color: '#93C5FD' }}>
+                    SETS: <strong style={{ color: '#FFF', fontSize: '13px' }}>{rightSetsWon}</strong>/{setsToWin}
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Quick Point Tap Overlay - Left Court */}
           <button
-            onClick={() => handleAddPoint('player1', 'quick')}
+            onClick={() => handleAddPoint(!sidesSwapped ? 'player1' : 'player2', 'quick')}
             disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
             style={{
               position: 'absolute',
@@ -1196,12 +1385,12 @@ export default function VolleyballScoring({
               zIndex: 8,
               touchAction: 'manipulation',
             }}
-            title="Tap left side to quickly award +1 point to Team 1"
+            title={`Tap left side to quickly award +1 point to ${!sidesSwapped ? match.player1_name : match.player2_name}`}
           />
 
           {/* Quick Point Tap Overlay - Right Court */}
           <button
-            onClick={() => handleAddPoint('player2', 'quick')}
+            onClick={() => handleAddPoint(!sidesSwapped ? 'player2' : 'player1', 'quick')}
             disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
             style={{
               position: 'absolute',
@@ -1215,7 +1404,7 @@ export default function VolleyballScoring({
               zIndex: 8,
               touchAction: 'manipulation',
             }}
-            title="Tap right side to quickly award +1 point to Team 2"
+            title={`Tap right side to quickly award +1 point to ${!sidesSwapped ? match.player2_name : match.player1_name}`}
           />
 
           {/* Set Completed Banner / Advance to Next Set Overlay */}

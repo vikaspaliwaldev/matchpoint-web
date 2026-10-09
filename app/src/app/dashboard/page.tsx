@@ -8,6 +8,7 @@ import { useSport } from '@/lib/sport-context';
 import ShuttlecockLoader from '@/components/ShuttlecockLoader';
 import { Tournament, TournamentEvent, Registration, Match, User } from '@/types';
 import * as dbService from '@/lib/supabase-service';
+import { getActiveMatchSet } from '@/lib/sports-rules';
 import {
   mockDashboardStats,
   mockTournaments,
@@ -84,7 +85,7 @@ function AdminDashboard() {
 
   const filteredTournaments = tournaments.filter(t => activeSport === 'all' || t.sport === activeSport);
   const filteredMatches = matches.filter(m => activeSport === 'all' || m.sport === activeSport);
-  const liveMatches = filteredMatches.filter(m => m.status === 'running');
+  const liveMatches = filteredMatches.filter(m => m.status === 'running' || m.status === 'paused');
   const recentTournaments = filteredTournaments.slice(0, 4);
 
   const stats = {
@@ -153,7 +154,7 @@ function AdminDashboard() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {liveMatches.map(match => {
-                const currentSet = match.sets[match.sets.length - 1];
+                const currentSet = getActiveMatchSet(match.sets);
                 const tour = tournaments.find(t => t.id === match.tournament_id);
                 const ev = events.find(e => e.id === match.event_id);
                 return (
@@ -164,9 +165,15 @@ function AdminDashboard() {
                     border: '1px solid var(--border)',
                   }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                      <span className="badge badge-live" style={{ fontSize: 10 }}>
-                        <span className="live-dot" style={{ width: 5, height: 5 }} /> LIVE
-                      </span>
+                      {match.status === 'paused' ? (
+                        <span className="badge badge-paused" style={{ fontSize: 10, background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', border: '1px solid rgba(245, 158, 11, 0.4)', fontWeight: 800 }}>
+                          ⏸ PAUSED
+                        </span>
+                      ) : (
+                        <span className="badge badge-live" style={{ fontSize: 10 }}>
+                          <span className="live-dot" style={{ width: 5, height: 5 }} /> LIVE
+                        </span>
+                      )}
                       <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{match.court}</span>
                     </div>
                     {tour && ev && (
@@ -530,6 +537,16 @@ function UmpireDashboard() {
       }
     }
     loadUmpireData();
+
+    // Poll umpire matches every 3 seconds to keep live scores up-to-date
+    const interval = setInterval(async () => {
+      try {
+        const mats = await dbService.getUmpireMatches(user.id);
+        setAssignedMatches(mats);
+      } catch {}
+    }, 3000);
+
+    return () => clearInterval(interval);
   }, [user]);
 
   if (loading) {
@@ -541,11 +558,8 @@ function UmpireDashboard() {
   }
 
   const filteredAssignedMatches = assignedMatches.filter(m => activeSport === 'all' || m.sport === activeSport);
-  const liveMatch = filteredAssignedMatches.find(m => m.status === 'running');
+  const liveMatches = filteredAssignedMatches.filter(m => m.status === 'running' || m.status === 'paused');
   const scheduledMatches = filteredAssignedMatches.filter(m => m.status === 'scheduled');
-
-  const liveTour = liveMatch ? tournaments.find(t => t.id === liveMatch.tournament_id) : null;
-  const liveEv = liveMatch ? events.find(e => e.id === liveMatch.event_id) : null;
 
   return (
     <div>
@@ -576,7 +590,7 @@ function UmpireDashboard() {
           <div className="stat-label">Assigned Matches</div>
         </div>
         <div className="stat-card">
-          <div className="stat-value" style={{ color: 'var(--score-live)' }}>{liveMatch ? 1 : 0}</div>
+          <div className="stat-value" style={{ color: 'var(--score-live)' }}>{liveMatches.length}</div>
           <div className="stat-label">Live Now</div>
         </div>
         <div className="stat-card">
@@ -585,41 +599,90 @@ function UmpireDashboard() {
         </div>
       </div>
 
-      {/* Current Live Match */}
-      {liveMatch && (
-        <div className="glass-card" style={{ padding: 24, marginBottom: 24, border: '1px solid rgba(34, 197, 94, 0.3)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-            <div>
-              <h2 style={{ fontSize: 18, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span className="live-dot" /> Currently Scoring
-              </h2>
-              {liveTour && liveEv && (
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent)', textTransform: 'uppercase', marginTop: 4 }}>
-                  {liveTour.name} · {liveEv.event_name}
+      {/* Current Live / Paused Matches */}
+      {liveMatches.length > 0 && (
+        <div style={{ marginBottom: 24 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
+            <span className="live-dot" /> Active & Live Matches ({liveMatches.length})
+          </h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {liveMatches.map(match => {
+              const currentSet = getActiveMatchSet(match.sets);
+              const tour = tournaments.find(t => t.id === match.tournament_id);
+              const ev = events.find(e => e.id === match.event_id);
+              const isPaused = match.status === 'paused';
+
+              return (
+                <div
+                  key={match.id}
+                  className="glass-card"
+                  style={{
+                    padding: 20,
+                    border: isPaused ? '1px solid rgba(245, 158, 11, 0.4)' : '1px solid rgba(34, 197, 94, 0.4)',
+                    background: isPaused ? 'rgba(245, 158, 11, 0.03)' : undefined,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      {isPaused ? (
+                        <span className="badge badge-paused" style={{ background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', border: '1px solid rgba(245, 158, 11, 0.4)', fontWeight: 800 }}>
+                          ⏸ PAUSED
+                        </span>
+                      ) : (
+                        <span className="badge badge-live" style={{ fontWeight: 800 }}>
+                          <span className="live-dot" style={{ width: 5, height: 5 }} /> LIVE
+                        </span>
+                      )}
+                      {tour && ev && (
+                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent)', textTransform: 'uppercase' }}>
+                          {tour.name} · {ev.event_name}
+                        </div>
+                      )}
+                    </div>
+                    <Link
+                      href={`/dashboard/scoring?matchId=${match.id}`}
+                      className="btn btn-primary btn-sm"
+                      style={{
+                        background: isPaused ? 'linear-gradient(135deg, #d97706, #b45309)' : undefined,
+                        border: 'none',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6
+                      }}
+                    >
+                      <IconPlay size={14} /> {isPaused ? 'Resume Scorer' : 'Open Scorer'}
+                    </Link>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-around', padding: '14px 0' }}>
+                    <div style={{ textAlign: 'center', flex: 1 }}>
+                      <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>{match.player1_name}</div>
+                      <div className="score-display" style={{ color: 'var(--text-primary)', fontSize: 36 }}>
+                        {currentSet?.player1_score ?? 0}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 20, fontWeight: 300, color: 'var(--text-muted)', padding: '0 12px' }}>vs</div>
+                    <div style={{ textAlign: 'center', flex: 1 }}>
+                      <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>{match.player2_name}</div>
+                      <div className="score-display" style={{ color: 'var(--text-secondary)', fontSize: 36 }}>
+                        {currentSet?.player2_score ?? 0}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8 }}>
+                    <span>{match.court}</span>
+                    <span>·</span>
+                    <span>Set {currentSet?.set_number ?? 1}</span>
+                    {match.sets.length > 1 && (
+                      <span style={{ color: 'rgba(255,255,255,0.45)' }}>
+                        (Sets: {match.sets.map(s => `${s.player1_score}-${s.player2_score}`).join(', ')})
+                      </span>
+                    )}
+                  </div>
                 </div>
-              )}
-            </div>
-            <Link href={`/dashboard/scoring?matchId=${liveMatch.id}`} className="btn btn-primary btn-sm">
-              <IconPlay size={14} /> Open Scorer
-            </Link>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-around', padding: '20px 0' }}>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>{liveMatch.player1_name}</div>
-              <div className="score-display" style={{ color: 'var(--text-primary)' }}>
-                {liveMatch.sets[liveMatch.sets.length - 1]?.player1_score ?? 0}
-              </div>
-            </div>
-            <div style={{ fontSize: 24, fontWeight: 300, color: 'var(--text-muted)' }}>vs</div>
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>{liveMatch.player2_name}</div>
-              <div className="score-display" style={{ color: 'var(--text-secondary)' }}>
-                {liveMatch.sets[liveMatch.sets.length - 1]?.player2_score ?? 0}
-              </div>
-            </div>
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>
-            {liveMatch.court} · Set {liveMatch.sets.length}
+              );
+            })}
           </div>
         </div>
       )}
@@ -1298,6 +1361,16 @@ function BroadcasterDashboard() {
       }
     }
     load();
+
+    // Poll live matches every 3 seconds to keep live scores up-to-date
+    const interval = setInterval(async () => {
+      try {
+        const mats = await dbService.getMatches();
+        setLiveMatches(mats.filter(m => m.status === 'running' || m.status === 'paused'));
+      } catch {}
+    }, 3000);
+
+    return () => clearInterval(interval);
   }, []);
 
   if (loading) {
@@ -1355,7 +1428,7 @@ function BroadcasterDashboard() {
             {filteredLiveMatches.map(match => {
               const tour = tournaments.find(t => t.id === match.tournament_id);
               const ev = events.find(e => e.id === match.event_id);
-              const currentSet = match.sets[match.sets.length - 1];
+              const currentSet = getActiveMatchSet(match.sets);
               return (
                 <div key={match.id} style={{
                   padding: 16, borderRadius: 'var(--radius-md)',
@@ -1363,11 +1436,22 @@ function BroadcasterDashboard() {
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16
                 }}>
                   <div style={{ flex: 1 }}>
-                    {tour && ev && (
-                      <div style={{ fontSize: 10, fontWeight: 700, color: '#f43f5e', textTransform: 'uppercase', marginBottom: 4 }}>
-                        {tour.name} · {ev.event_name}
-                      </div>
-                    )}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                      {match.status === 'paused' ? (
+                        <span className="badge badge-paused" style={{ fontSize: 9, background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', border: '1px solid rgba(245, 158, 11, 0.4)', fontWeight: 800, padding: '1px 6px' }}>
+                          ⏸ PAUSED
+                        </span>
+                      ) : (
+                        <span className="badge badge-live" style={{ fontSize: 9, padding: '1px 6px' }}>
+                          <span className="live-dot" style={{ width: 4, height: 4 }} /> LIVE
+                        </span>
+                      )}
+                      {tour && ev && (
+                        <div style={{ fontSize: 10, fontWeight: 700, color: '#f43f5e', textTransform: 'uppercase' }}>
+                          {tour.name} · {ev.event_name}
+                        </div>
+                      )}
+                    </div>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
                       <span style={{ fontSize: 14, fontWeight: 600 }}>{match.player1_name}</span>
                       <span style={{ fontSize: 20, fontWeight: 800, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
@@ -1381,7 +1465,12 @@ function BroadcasterDashboard() {
                       </span>
                     </div>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                      {match.court} · Set {match.sets.length}
+                      {match.court} · Set {currentSet?.set_number ?? 1}
+                      {match.sets.length > 1 && (
+                        <span style={{ marginLeft: 8, color: 'rgba(255,255,255,0.4)' }}>
+                          (Sets: {match.sets.map(s => `${s.player1_score}-${s.player2_score}`).join(', ')})
+                        </span>
+                      )}
                     </div>
                   </div>
                   <Link

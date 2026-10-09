@@ -376,10 +376,16 @@ export default function MatchesPage() {
                     )}
                   </td>
                   <td>
-                    <span className={`badge badge-${match.status === 'running' ? 'live' : match.status === 'completed' ? 'completed' : 'open'}`}>
-                      {match.status === 'running' && <span className="live-dot" style={{ width: 5, height: 5 }} />}
-                      {match.status}
-                    </span>
+                    {match.status === 'paused' ? (
+                      <span className="badge badge-paused" style={{ background: '#f59e0b', color: '#fff', fontWeight: 700 }}>
+                        ⏸ Paused
+                      </span>
+                    ) : (
+                      <span className={`badge badge-${match.status === 'running' ? 'live' : match.status === 'completed' ? 'completed' : 'open'}`}>
+                        {match.status === 'running' && <span className="live-dot" style={{ width: 5, height: 5 }} />}
+                        {match.status}
+                      </span>
+                    )}
                   </td>
                   <td style={{ fontSize: 13, color: 'var(--text-muted)' }}>
                     {match.scheduled_time

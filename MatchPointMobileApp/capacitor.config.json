@@ -1,0 +1,13 @@
+{
+  "appId": "io.matchpoint.app",
+  "appName": "MatchPoint",
+  "webDir": "www",
+  "server": {
+    "url": "https://matchpointdemo.netlify.app",
+    "cleartext": true,
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

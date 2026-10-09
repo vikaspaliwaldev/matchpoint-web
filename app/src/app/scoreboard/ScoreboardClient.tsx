@@ -209,8 +209,20 @@ export default function ScoreboardClient() {
             ))}
           </select>
 
-          <div style={{ background: match.status === 'running' ? '#DC2626' : '#EAB308', padding: '0.6vh 1.5vw', borderRadius: '8px', fontWeight: '900', fontSize: '1.2vw', letterSpacing: '2px' }}>
-            {match.status === 'running' ? '● LIVE' : match.status.toUpperCase()}
+          <div style={{
+            background: match.status === 'running' ? '#DC2626' : match.status === 'paused' ? '#D97706' : '#EAB308',
+            color: '#FFFFFF',
+            padding: '0.6vh 1.5vw',
+            borderRadius: '8px',
+            fontWeight: '900',
+            fontSize: '1.2vw',
+            letterSpacing: '2px',
+            boxShadow: match.status === 'paused' ? '0 0 25px rgba(217, 119, 6, 0.6)' : 'none',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5vw'
+          }}>
+            {match.status === 'running' ? '● LIVE' : match.status === 'paused' ? '⏸ MATCH PAUSED' : match.status.toUpperCase()}
           </div>
           <div
             title="Match Duration"

@@ -412,6 +412,11 @@ export default function BroadcastStudioPage() {
               // Right part: Set & Court info
               ctx.textAlign = 'right';
               ctx.textBaseline = 'middle';
+              ctx.font = `bold 12px system-ui, sans-serif`;
+              if (state.match.status === 'paused') {
+                ctx.fillStyle = '#f59e0b';
+                ctx.fillText('⏸ PAUSED  ·  ', canvas.width - 24 - ctx.measureText(`Set ${state.match.sets.length}`).width - (state.match.court ? 100 : 0), tickerY + 30);
+              }
               ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
               ctx.font = `13px system-ui, sans-serif`;
               let infoText = `Set ${state.match.sets.length}`;
@@ -571,17 +576,17 @@ export default function BroadcastStudioPage() {
               // Set info & court bottom row
               const bottomRowY = scoreStartTop + 2 * rowHeight + 10 * scale;
               
-              // Draw solid red dot
-              ctx.fillStyle = '#f43f5e';
+              // Draw status dot (amber if paused, red if running)
+              ctx.fillStyle = state.match.status === 'paused' ? '#f59e0b' : '#f43f5e';
               ctx.beginPath();
               ctx.arc(padX + 5 * scale, bottomRowY, 4 * scale, 0, 2 * Math.PI);
               ctx.fill();
               
-              ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+              ctx.fillStyle = state.match.status === 'paused' ? '#f59e0b' : 'rgba(255, 255, 255, 0.4)';
               ctx.font = `${Math.round(16 * scale)}px system-ui, sans-serif`;
               ctx.textAlign = 'left';
               ctx.textBaseline = 'middle';
-              ctx.fillText(`Set ${state.match.sets.length}`, padX + 15 * scale, bottomRowY);
+              ctx.fillText(state.match.status === 'paused' ? `PAUSED · Set ${state.match.sets.length}` : `Set ${state.match.sets.length}`, padX + 15 * scale, bottomRowY);
               
               let textX = padX + 80 * scale;
               if (state.match.court) {
@@ -1017,7 +1022,23 @@ export default function BroadcastStudioPage() {
                 <div style={{ display: 'flex', width: '100%', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
                   {/* Left: Tournament/Event */}
                   <div style={{ display: 'flex', flexDirection: 'column', textAlign: 'left' }}>
-                    <span style={{ fontSize: 9, fontWeight: 800, color: '#2563eb', letterSpacing: '0.05em' }}>LIVE BROADCAST</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      {selectedMatch.status === 'paused' ? (
+                        <span style={{
+                          fontSize: 9,
+                          fontWeight: 800,
+                          color: '#fff',
+                          background: '#f59e0b',
+                          padding: '1px 6px',
+                          borderRadius: 4,
+                          letterSpacing: '0.05em'
+                        }}>
+                          ⏸ PAUSED
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: 9, fontWeight: 800, color: '#2563eb', letterSpacing: '0.05em' }}>LIVE BROADCAST</span>
+                      )}
+                    </div>
                     <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.7)', fontWeight: 600, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {selectedTournament?.name} · {selectedEvent?.event_name}
                     </span>
@@ -1085,11 +1106,26 @@ export default function BroadcastStudioPage() {
                 // Original Vertical Layout for compact mobile page preview
                 <>
                   {/* Match context */}
-                  {selectedTournament && selectedEvent && (
-                    <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 6 }}>
-                      {selectedTournament.name} · {selectedEvent.event_name}
-                    </div>
-                  )}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    {selectedTournament && selectedEvent && (
+                      <div style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                        {selectedTournament.name} · {selectedEvent.event_name}
+                      </div>
+                    )}
+                    {selectedMatch.status === 'paused' && (
+                      <span style={{
+                        fontSize: 9,
+                        fontWeight: 800,
+                        color: '#fff',
+                        background: '#f59e0b',
+                        padding: '1px 6px',
+                        borderRadius: 4,
+                        letterSpacing: '0.05em'
+                      }}>
+                        ⏸ PAUSED
+                      </span>
+                    )}
+                  </div>
 
                   {/* Scores */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

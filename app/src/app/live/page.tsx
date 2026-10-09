@@ -680,10 +680,11 @@ export default function PublicLiveScoreboardPage() {
               const elapsedTime = getElapsedTime(match);
               
               let servingTeam: 'player1' | 'player2' | null = null;
+              const activeSet = match.sets?.find(s => !s.is_complete) || match.sets?.[match.sets.length - 1];
+              const activeSetIdx = match.sets?.findIndex(s => !s.is_complete) !== -1 ? match.sets?.findIndex(s => !s.is_complete) : (match.sets?.length ? match.sets.length - 1 : 0);
               if (match.sport === 'tennis' || match.sport === 'squash' || match.sport === 'badminton') {
                 servingTeam = match.sport_metadata?.serving_team || match.sport_metadata?.initial_server || 'player1';
               } else if (match.sport === 'table_tennis') {
-                const activeSet = match.sets?.[match.sets.length - 1];
                 const p1Score = activeSet?.player1_score ?? 0;
                 const p2Score = activeSet?.player2_score ?? 0;
                 const ttInitialServer = match.sport_metadata?.initial_server || 'player1';
@@ -747,6 +748,39 @@ export default function PublicLiveScoreboardPage() {
                             👁️ {match.max_viewers}
                           </span>
                         )}
+                        {match.status === 'paused' ? (
+                          <span style={{
+                            background: '#f59e0b',
+                            color: '#ffffff',
+                            padding: '2px 8px',
+                            borderRadius: 12,
+                            fontSize: 10,
+                            fontWeight: 700,
+                            letterSpacing: '0.04em',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 3,
+                            boxShadow: '0 0 10px rgba(245, 158, 11, 0.4)'
+                          }}>
+                            ⏸ PAUSED
+                          </span>
+                        ) : (
+                          <span style={{
+                            background: '#22c55e',
+                            color: '#ffffff',
+                            padding: '2px 8px',
+                            borderRadius: 12,
+                            fontSize: 10,
+                            fontWeight: 700,
+                            letterSpacing: '0.04em',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 3
+                          }}>
+                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#fff', display: 'inline-block' }} />
+                            LIVE
+                          </span>
+                        )}
                         {elapsedTime && (
                           <span style={{
                             background: 'var(--accent)',
@@ -785,7 +819,7 @@ export default function PublicLiveScoreboardPage() {
                         <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                           {setsArray.map((_, idx) => {
                             const setObj = match.sets[idx];
-                            const isCurrentSet = idx === match.sets.length - 1 && !setObj?.is_complete;
+                            const isCurrentSet = idx === activeSetIdx && !setObj?.is_complete;
                             const score = setObj ? setObj.player1_score : ' ';
                             return (
                               <span
@@ -838,7 +872,7 @@ export default function PublicLiveScoreboardPage() {
                         <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                           {setsArray.map((_, idx) => {
                             const setObj = match.sets[idx];
-                            const isCurrentSet = idx === match.sets.length - 1 && !setObj?.is_complete;
+                            const isCurrentSet = idx === activeSetIdx && !setObj?.is_complete;
                             const score = setObj ? setObj.player2_score : ' ';
                             return (
                               <span

@@ -1041,7 +1041,13 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                           </td>
                           <td>
                             {(() => {
-                              if (match.status === 'running' || match.status === 'paused') {
+                              if (match.status === 'paused') {
+                                return (
+                                  <span className="badge badge-paused" style={{ background: '#f59e0b', color: '#fff', display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 700 }}>
+                                    ⏸ Paused
+                                  </span>
+                                );
+                              } else if (match.status === 'running') {
                                 return (
                                   <span className="badge badge-live" style={{ background: 'var(--score-live)', color: '#fff', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                                     <span className="live-dot" style={{ background: '#fff', width: 6, height: 6 }} /> Live

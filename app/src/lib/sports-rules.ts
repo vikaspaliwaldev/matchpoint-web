@@ -508,4 +508,15 @@ export function getDefaultScoringFormatForSport(sport?: string): string {
   return def ? def.value : options[0]?.value || '21-point';
 }
 
+/**
+ * Returns the currently active set for a match.
+ * If there are sets, it finds the first incomplete set (e.g. Set 1 if in progress),
+ * or the last set if all are completed or no set is flagged incomplete.
+ */
+export function getActiveMatchSet(sets?: MatchSet[]): MatchSet | null {
+  if (!sets || sets.length === 0) return null;
+  const active = sets.find(s => !s.is_complete);
+  return active || sets[sets.length - 1] || null;
+}
+
 
