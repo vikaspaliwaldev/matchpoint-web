@@ -25,10 +25,19 @@ import { Match, TournamentMedia, Tournament, TournamentEvent, Team, User } from 
 import WinPredictorGauge from '@/components/WinPredictorGauge';
 import MatchCommentsSidebar from '@/components/MatchCommentsSidebar';
 import MatchMediaModal, { getYouTubeEmbedUrl, getYouTubeThumbnail } from '@/components/MatchMediaModal';
+import CricketMatchModal from '@/components/CricketMatchModal';
 import { useAuth } from '@/lib/auth-context';
 import { getMatchNumber, getUniqueMatchId } from '@/lib/match-numbering';
 import { generateMatchHighlights } from '@/lib/highlights';
-import { calculateVolleyballStandings } from '@/lib/sports-rules';
+import {
+  calculateVolleyballStandings,
+  calculateCricketStandings,
+  calculateCricketLeaderboards,
+  CricketMetadata,
+  CricketBall,
+  calculateCurrentRunRate,
+  calculateRequiredRunRate,
+} from '@/lib/sports-rules';
 import { getTeamLogo, registerTeamLogo } from '@/lib/team-logos';
 
 // Helper for dynamic voting confidence percentages
@@ -138,6 +147,7 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [activeChatMatchId, setActiveChatMatchId] = useState<string | null>(null);
   const [selectedMediaMatch, setSelectedMediaMatch] = useState<Match | null>(null);
+  const [selectedCricketMatch, setSelectedCricketMatch] = useState<Match | null>(null);
   const [expandedSummaryMatchId, setExpandedSummaryMatchId] = useState<string | null>(null);
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string>('all');
@@ -642,34 +652,180 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                         </div>
 
                         {/* Card Body */}
-                        <div style={{ padding: '24px 20px 16px 20px', display: 'flex', flexDirection: 'column', gap: 16, flex: 1, justifyContent: 'center' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-around', padding: '10px 0' }}>
-                            <div style={{ textAlign: 'center', flex: 1 }}>
-                              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-                                {getTeamLogo(match.player1_name) && match.player1_name !== 'TBD' && match.player1_name !== 'BYE' && (
-                                  <img src={getTeamLogo(match.player1_name)!} alt="" style={{ width: 18, height: 18, borderRadius: 4, objectFit: 'cover' }} />
+                        {match.sport === 'cricket' ? (() => {
+                          const cMeta = match.sport_metadata as CricketMetadata | undefined;
+                          const cInn1 = cMeta?.innings_1;
+                          const cInn2 = cMeta?.innings_2;
+                          const curInn = cMeta?.current_innings === 2 && cInn2 ? cInn2 : cInn1;
+                          const crrVal = curInn ? calculateCurrentRunRate(curInn.total_runs, curInn.balls_bowled) : 0;
+                          const target = cInn2?.target_runs;
+                          const ballsRem = curInn ? Math.max(0, curInn.max_overs * 6 - curInn.balls_bowled) : 0;
+                          const runsReq = target && curInn ? Math.max(0, target - curInn.total_runs) : 0;
+                          const rrrVal = cMeta?.current_innings === 2 && target ? calculateRequiredRunRate(runsReq, ballsRem) : 0;
+
+                          const strikerBat = cMeta?.striker_id && curInn?.batters ? curInn.batters[cMeta.striker_id] : null;
+                          const nonStrikerBat = cMeta?.non_striker_id && curInn?.batters ? curInn.batters[cMeta.non_striker_id] : null;
+                          const curBowler = cMeta?.bowler_id && curInn?.bowlers ? curInn.bowlers[cMeta.bowler_id] : null;
+                          const recentBalls = (curInn?.deliveries || []).slice(-6);
+
+                          return (
+                            <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12, flex: 1 }}>
+                              {/* Team Score Row */}
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+                                <div>
+                                  <div style={{ fontSize: 11, fontWeight: 700, color: '#ea580c', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                                    {curInn ? curInn.batting_team_name : match.player1_name} {cMeta?.current_innings ? `(Inn ${cMeta.current_innings})` : ''}
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
+                                    <span style={{ fontSize: 32, fontWeight: 900, fontFamily: 'monospace', color: 'var(--text-primary)', lineHeight: 1 }}>
+                                      {curInn ? `${curInn.total_runs}/${curInn.wickets}` : '0/0'}
+                                    </span>
+                                    <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-muted)' }}>
+                                      ({curInn?.overs_formatted || '0.0'} / {curInn?.max_overs || cMeta?.overs_per_innings || 20} ov)
+                                    </span>
+                                  </div>
+                                  {cInn1 && cMeta?.current_innings === 2 && (
+                                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                                      1st Inn: {cInn1.batting_team_name} {cInn1.total_runs}/{cInn1.wickets} ({cInn1.overs_formatted} ov)
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div style={{ textAlign: 'right' }}>
+                                  <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--accent)' }}>
+                                    CRR: {crrVal.toFixed(2)}
+                                  </div>
+                                  {cMeta?.current_innings === 2 && target && (
+                                    <div style={{ fontSize: 11, fontWeight: 800, color: '#f59e0b', marginTop: 2 }}>
+                                      Need {runsReq} runs ({ballsRem}b) · RRR: {rrrVal.toFixed(2)}
+                                    </div>
+                                  )}
+                                  {cMeta?.toss_winner_id && (
+                                    <div style={{ fontSize: 10, color: '#64748b', marginTop: 2, fontStyle: 'italic' }}>
+                                      Toss: {cMeta.toss_winner_id === 'player1' ? match.player1_name : match.player2_name} opt to {cMeta.toss_decision}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Batters & Bowler Strip */}
+                              <div style={{
+                                background: 'var(--bg-elevated)',
+                                border: '1px solid var(--border)',
+                                borderRadius: 8,
+                                padding: '8px 12px',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 6,
+                                fontSize: 12,
+                              }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <span style={{ fontWeight: 800, color: 'var(--accent)' }}>
+                                      🏏 {cMeta?.striker_name || strikerBat?.player_name || 'Striker'} *
+                                    </span>
+                                    <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 4px', borderRadius: 3, background: 'rgba(37,99,235,0.1)', color: 'var(--accent)' }}>
+                                      {strikerBat?.batting_style || cMeta?.striker_batting_style || 'RHB'}
+                                    </span>
+                                  </div>
+                                  <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>
+                                    {strikerBat?.runs ?? 0} ({strikerBat?.balls_faced ?? 0}b)
+                                  </span>
+                                </div>
+
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>
+                                      {cMeta?.non_striker_name || nonStrikerBat?.player_name || 'Non-Striker'}
+                                    </span>
+                                    <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 4px', borderRadius: 3, background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)' }}>
+                                      {nonStrikerBat?.batting_style || cMeta?.non_striker_batting_style || 'RHB'}
+                                    </span>
+                                  </div>
+                                  <span style={{ fontFamily: 'monospace', color: 'var(--text-muted)' }}>
+                                    {nonStrikerBat?.runs ?? 0} ({nonStrikerBat?.balls_faced ?? 0}b)
+                                  </span>
+                                </div>
+
+                                {curBowler && (
+                                  <div style={{ borderTop: '1px solid var(--border)', paddingTop: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11 }}>
+                                    <span style={{ color: '#10b981', fontWeight: 700 }}>
+                                      🔴 {cMeta?.bowler_name || curBowler.player_name}
+                                    </span>
+                                    <span style={{ fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
+                                      {curBowler.overs}-{curBowler.maidens}-{curBowler.runs_conceded}-{curBowler.wickets} (Econ {curBowler.economy})
+                                    </span>
+                                  </div>
                                 )}
-                                <span>{match.player1_name}</span>
                               </div>
-                              <div className="score-display" style={{ fontSize: 48 }}>
-                                {isTeamMatch ? t1Wins : (currentSet?.player1_score ?? 0)}
-                              </div>
-                              {isTeamMatch && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Ties Won</div>}
-                            </div>
-                            <div style={{ fontSize: 20, fontWeight: 300, color: 'var(--text-muted)', padding: '0 12px' }}>vs</div>
-                            <div style={{ textAlign: 'center', flex: 1 }}>
-                              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-                                {getTeamLogo(match.player2_name) && match.player2_name !== 'TBD' && match.player2_name !== 'BYE' && (
-                                  <img src={getTeamLogo(match.player2_name)!} alt="" style={{ width: 18, height: 18, borderRadius: 4, objectFit: 'cover' }} />
+
+                              {/* Recent Deliveries */}
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflowX: 'auto' }}>
+                                <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--text-muted)', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Recent:</span>
+                                {recentBalls.length === 0 ? (
+                                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Waiting for first delivery</span>
+                                ) : (
+                                  recentBalls.map((b: CricketBall, bi: number) => {
+                                    const isW = b.is_wicket;
+                                    const isSix = b.runs_off_bat === 6;
+                                    const isFour = b.runs_off_bat === 4;
+                                    const isExtra = !b.is_legal;
+                                    const bg = isW ? '#ef4444' : isSix ? '#8b5cf6' : isFour ? '#10b981' : isExtra ? '#f59e0b' : 'rgba(255,255,255,0.1)';
+                                    const label = isW ? 'W' : b.extra_type ? `${b.total_runs}${b.extra_type === 'wide' ? 'wd' : 'nb'}` : `${b.runs_off_bat}`;
+                                    return (
+                                      <span
+                                        key={bi}
+                                        style={{
+                                          minWidth: 22,
+                                          height: 22,
+                                          borderRadius: 11,
+                                          background: bg,
+                                          color: '#fff',
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          fontSize: 10,
+                                          fontWeight: 800,
+                                          flexShrink: 0,
+                                        }}
+                                      >
+                                        {label}
+                                      </span>
+                                    );
+                                  })
                                 )}
-                                <span>{match.player2_name}</span>
                               </div>
-                              <div className="score-display" style={{ fontSize: 48, color: 'var(--text-secondary)' }}>
-                                {isTeamMatch ? t2Wins : (currentSet?.player2_score ?? 0)}
-                              </div>
-                              {isTeamMatch && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Ties Won</div>}
                             </div>
-                          </div>
+                          );
+                        })() : (
+                          <div style={{ padding: '24px 20px 16px 20px', display: 'flex', flexDirection: 'column', gap: 16, flex: 1, justifyContent: 'center' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-around', padding: '10px 0' }}>
+                              <div style={{ textAlign: 'center', flex: 1 }}>
+                                <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                                  {getTeamLogo(match.player1_name) && match.player1_name !== 'TBD' && match.player1_name !== 'BYE' && (
+                                    <img src={getTeamLogo(match.player1_name)!} alt="" style={{ width: 18, height: 18, borderRadius: 4, objectFit: 'cover' }} />
+                                  )}
+                                  <span>{match.player1_name}</span>
+                                </div>
+                                <div className="score-display" style={{ fontSize: 48 }}>
+                                  {isTeamMatch ? t1Wins : (currentSet?.player1_score ?? 0)}
+                                </div>
+                                {isTeamMatch && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Ties Won</div>}
+                              </div>
+                              <div style={{ fontSize: 20, fontWeight: 300, color: 'var(--text-muted)', padding: '0 12px' }}>vs</div>
+                              <div style={{ textAlign: 'center', flex: 1 }}>
+                                <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+                                  {getTeamLogo(match.player2_name) && match.player2_name !== 'TBD' && match.player2_name !== 'BYE' && (
+                                    <img src={getTeamLogo(match.player2_name)!} alt="" style={{ width: 18, height: 18, borderRadius: 4, objectFit: 'cover' }} />
+                                  )}
+                                  <span>{match.player2_name}</span>
+                                </div>
+                                <div className="score-display" style={{ fontSize: 48, color: 'var(--text-secondary)' }}>
+                                  {isTeamMatch ? t2Wins : (currentSet?.player2_score ?? 0)}
+                                </div>
+                                {isTeamMatch && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>Ties Won</div>}
+                              </div>
+                            </div>
 
                           {/* Set history (Individual matches only) */}
                           {!isTeamMatch && match.sets.length > 1 && (
@@ -809,6 +965,7 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                             )
                           ) : null}
                         </div>
+                        )}
 
                         {/* Card Footer */}
                         <div style={{
@@ -823,9 +980,30 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                         }}>
                           <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <IconActivity size={13} />
-                            {match.status === 'paused' ? 'Match Paused' : `Game in Set ${match.sets.length}`}
+                            {match.sport === 'cricket'
+                              ? (match.status === 'paused' ? 'Match Paused' : 'Innings in Progress')
+                              : (match.status === 'paused' ? 'Match Paused' : `Game in Set ${match.sets.length}`)}
                           </span>
-                          <div style={{ display: 'flex', gap: 6 }}>
+                          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                            {match.sport === 'cricket' && (
+                              <button
+                                className="btn btn-ghost btn-sm"
+                                onClick={() => setSelectedCricketMatch(match)}
+                                style={{
+                                  fontSize: 11,
+                                  padding: '4px 8px',
+                                  color: '#fff',
+                                  background: 'linear-gradient(135deg, #ea580c 0%, #c2410c 100%)',
+                                  borderRadius: 'var(--radius-sm)',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 4,
+                                  fontWeight: 700,
+                                }}
+                              >
+                                📊 Scorecard
+                              </button>
+                            )}
                             <button
                               className="btn btn-ghost btn-sm"
                               onClick={() => setSelectedMediaMatch(match)}
@@ -978,25 +1156,53 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                               )}
 
                               {/* Live score inline for running */}
-                              {(match.status === 'running' || match.status === 'paused') && match.sets && match.sets.length > 0 && (
-                                <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
-                                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--score-live)' }}>Live Score:</span>
-                                  <div style={{ display: 'flex', gap: 6 }}>
-                                    {match.sets.map((s, idx) => (
-                                      <span key={idx} style={{
-                                        fontSize: 11,
+                              {(match.status === 'running' || match.status === 'paused') && (
+                                match.sport === 'cricket' ? (() => {
+                                  const cMeta = match.sport_metadata as CricketMetadata | undefined;
+                                  const inn = cMeta?.current_innings === 2 && cMeta?.innings_2 ? cMeta.innings_2 : cMeta?.innings_1;
+                                  return (
+                                    <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--score-live)' }}>Live Score:</span>
+                                      <span style={{
+                                        fontSize: 12,
                                         fontFamily: 'var(--font-mono)',
-                                        background: s.is_complete ? 'var(--bg-elevated)' : 'rgba(239, 68, 68, 0.1)',
-                                        color: s.is_complete ? 'var(--text-secondary)' : 'var(--score-live)',
-                                        padding: '2px 6px',
+                                        background: 'rgba(234, 88, 12, 0.15)',
+                                        color: '#ea580c',
+                                        padding: '2px 8px',
                                         borderRadius: 'var(--radius-sm)',
-                                        fontWeight: 600
+                                        fontWeight: 800
                                       }}>
-                                        {s.player1_score}-{s.player2_score}
+                                        {inn ? `${inn.batting_team_name} ${inn.total_runs}/${inn.wickets} (${inn.overs_formatted} ov)` : '0/0'}
                                       </span>
-                                    ))}
+                                      <button
+                                        onClick={() => setSelectedCricketMatch(match)}
+                                        className="btn btn-ghost btn-sm"
+                                        style={{ fontSize: 10, padding: '2px 6px', height: 'auto', background: 'var(--accent-subtle)', color: 'var(--accent)', fontWeight: 700 }}
+                                      >
+                                        📊 Full Scorecard
+                                      </button>
+                                    </div>
+                                  );
+                                })() : match.sets && match.sets.length > 0 && (
+                                  <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--score-live)' }}>Live Score:</span>
+                                    <div style={{ display: 'flex', gap: 6 }}>
+                                      {match.sets.map((s, idx) => (
+                                        <span key={idx} style={{
+                                          fontSize: 11,
+                                          fontFamily: 'var(--font-mono)',
+                                          background: s.is_complete ? 'var(--bg-elevated)' : 'rgba(239, 68, 68, 0.1)',
+                                          color: s.is_complete ? 'var(--text-secondary)' : 'var(--score-live)',
+                                          padding: '2px 6px',
+                                          borderRadius: 'var(--radius-sm)',
+                                          fontWeight: 600
+                                        }}>
+                                          {s.player1_score}-{s.player2_score}
+                                        </span>
+                                      ))}
+                                    </div>
                                   </div>
-                                </div>
+                                )
                               )}
 
                               {/* Result inline for completed */}
@@ -1319,7 +1525,32 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                           </div>
                         </div>
                         <div style={{ display: 'flex', gap: 16, fontFamily: 'var(--font-mono)' }}>
-                          {isTeamMatch ? (
+                          {match.sport === 'cricket' ? (() => {
+                            const cMeta = match.sport_metadata as CricketMetadata | undefined;
+                            const inn1 = cMeta?.innings_1;
+                            const inn2 = cMeta?.innings_2;
+                            return (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end', minWidth: 140 }}>
+                                {inn1 && (
+                                  <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)' }}>
+                                    {inn1.batting_team_name}: <span style={{ color: '#ea580c' }}>{inn1.total_runs}/{inn1.wickets}</span> ({inn1.overs_formatted} ov)
+                                  </div>
+                                )}
+                                {inn2 && (
+                                  <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-secondary)' }}>
+                                    {inn2.batting_team_name}: <span style={{ color: '#ea580c' }}>{inn2.total_runs}/{inn2.wickets}</span> ({inn2.overs_formatted} ov)
+                                  </div>
+                                )}
+                                <button
+                                  onClick={() => setSelectedCricketMatch(match)}
+                                  className="btn btn-ghost btn-sm"
+                                  style={{ fontSize: 10, padding: '2px 8px', height: 'auto', background: 'var(--accent-subtle)', color: 'var(--accent)', fontWeight: 700, marginTop: 2 }}
+                                >
+                                  📊 Full Scorecard
+                                </button>
+                              </div>
+                            );
+                          })() : isTeamMatch ? (
                             <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
                               <div style={{ textAlign: 'center' }}>
                                 <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Ties Won</div>
@@ -1773,13 +2004,8 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
 
               const roundWiseData = groupsArr.map(group => {
                 const teamMap = new Map<string, string>();
-                
-                // If tournament has explicit teams registered, register them first
-                if (tournamentTeams && tournamentTeams.length > 0) {
-                  tournamentTeams.forEach(t => teamMap.set(t.name.trim().toLowerCase(), t.name.trim()));
-                }
 
-                // Also gather teams present in this round's matches, avoiding TBD and BYE
+                // Gather only the teams present in this specific round's matches, avoiding TBD and BYE
                 group.matches.forEach(m => {
                   if (m.player1_name && m.player1_name !== 'TBD' && m.player1_name !== 'BYE') {
                     const key = m.player1_name.trim().toLowerCase();
@@ -1800,9 +2026,11 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                   };
                 });
 
-                let standings = [];
+                let standings: any[] = [];
                 if (tournament.sport === 'volleyball') {
                   standings = calculateVolleyballStandings(teamsList, group.matches as any);
+                } else if (tournament.sport === 'cricket') {
+                  standings = calculateCricketStandings(teamsList, group.matches as any);
                 } else {
                   standings = teamsList.map(t => {
                     let played = 0;
@@ -1950,10 +2178,20 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                               <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>Pld</th>
                               <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>W</th>
                               <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>L</th>
-                              <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>Sets (W - L)</th>
-                              <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>Set Ratio</th>
-                              {tournament.sport === 'volleyball' && (
-                                <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>Pt Quotient</th>
+                              {tournament.sport === 'cricket' ? (
+                                <>
+                                  <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>For (Runs/Ov)</th>
+                                  <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>Against</th>
+                                  <th style={{ padding: '12px 18px', fontWeight: 700, color: '#38bdf8', textAlign: 'center' }}>NRR</th>
+                                </>
+                              ) : (
+                                <>
+                                  <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>Sets (W - L)</th>
+                                  <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>Set Ratio</th>
+                                  {tournament.sport === 'volleyball' && (
+                                    <th style={{ padding: '12px 18px', fontWeight: 600, color: 'var(--text-secondary)', textAlign: 'center' }}>Pt Quotient</th>
+                                  )}
+                                </>
                               )}
                               <th style={{ padding: '12px 18px', fontWeight: 700, color: 'var(--accent)', textAlign: 'right' }}>
                                 {tournament.sport === 'volleyball' ? 'FIVB Pts' : 'Points'}
@@ -1964,7 +2202,7 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                             {roundGroup.isTbd || roundGroup.standings.length === 0 ? (
                               <tr>
                                 <td
-                                  colSpan={tournament.sport === 'volleyball' ? 8 : 7}
+                                  colSpan={tournament.sport === 'volleyball' ? 8 : tournament.sport === 'cricket' ? 8 : 7}
                                   style={{
                                     padding: '36px 20px',
                                     textAlign: 'center',
@@ -1977,7 +2215,7 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                                 </td>
                               </tr>
                             ) : (
-                              roundGroup.standings.map((row, idx) => {
+                              roundGroup.standings.map((row: any, idx: number) => {
                                 const rank = idx + 1;
                                 return (
                                   <tr
@@ -2009,16 +2247,32 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                                     <td style={{ padding: '14px 18px', textAlign: 'center' }}>{row.played}</td>
                                     <td style={{ padding: '14px 18px', textAlign: 'center', color: 'var(--score-win)', fontWeight: 600 }}>{row.won}</td>
                                     <td style={{ padding: '14px 18px', textAlign: 'center', color: 'var(--score-loss)' }}>{row.lost}</td>
-                                    <td style={{ padding: '14px 18px', textAlign: 'center', fontFamily: 'monospace', fontWeight: 600 }}>
-                                      {row.setsWon} - {row.setsLost}
-                                    </td>
-                                    <td style={{ padding: '14px 18px', textAlign: 'center', fontWeight: 600 }}>
-                                      {row.setRatio.toFixed(2)}
-                                    </td>
-                                    {tournament.sport === 'volleyball' && (
-                                      <td style={{ padding: '14px 18px', textAlign: 'center', color: '#93C5FD', fontWeight: 600 }}>
-                                        {row.pointQuotient.toFixed(3)}
-                                      </td>
+                                    {tournament.sport === 'cricket' ? (
+                                      <>
+                                        <td style={{ padding: '14px 18px', textAlign: 'center', fontFamily: 'monospace', fontWeight: 600 }}>
+                                          {row.runsScored} ({row.oversFacedFormatted})
+                                        </td>
+                                        <td style={{ padding: '14px 18px', textAlign: 'center', fontFamily: 'monospace', color: 'var(--text-muted)' }}>
+                                          {row.runsConceded} ({row.oversBowledFormatted})
+                                        </td>
+                                        <td style={{ padding: '14px 18px', textAlign: 'center', fontWeight: 800, color: row.netRunRate >= 0 ? '#10b981' : '#ef4444' }}>
+                                          {row.netRunRate > 0 ? `+${row.netRunRate.toFixed(3)}` : row.netRunRate.toFixed(3)}
+                                        </td>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <td style={{ padding: '14px 18px', textAlign: 'center', fontFamily: 'monospace', fontWeight: 600 }}>
+                                          {row.setsWon} - {row.setsLost}
+                                        </td>
+                                        <td style={{ padding: '14px 18px', textAlign: 'center', fontWeight: 600 }}>
+                                          {row.setRatio?.toFixed ? row.setRatio.toFixed(2) : row.setRatio}
+                                        </td>
+                                        {tournament.sport === 'volleyball' && (
+                                          <td style={{ padding: '14px 18px', textAlign: 'center', color: '#93C5FD', fontWeight: 600 }}>
+                                            {row.pointQuotient?.toFixed ? row.pointQuotient.toFixed(3) : row.pointQuotient}
+                                          </td>
+                                        )}
+                                      </>
                                     )}
                                     <td style={{ padding: '14px 18px', textAlign: 'right', fontWeight: 800, color: 'var(--accent)', fontSize: 15 }}>
                                       {row.points}
@@ -2032,6 +2286,92 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
                       </div>
                     </div>
                   ))}
+
+                  {/* Cricket Leaderboards: Orange Cap & Purple Cap */}
+                  {tournament.sport === 'cricket' && (() => {
+                    const { orangeCap, purpleCap } = calculateCricketLeaderboards(liveScores as any);
+                    return (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 20, marginTop: 10 }}>
+                        {/* Orange Cap (Top Run Scorers) */}
+                        <div style={{
+                          background: 'linear-gradient(135deg, rgba(234, 88, 12, 0.08) 0%, var(--bg-card) 100%)',
+                          border: '1px solid rgba(234, 88, 12, 0.3)',
+                          borderRadius: 'var(--radius-md)',
+                          padding: 18,
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                            <span style={{ fontSize: 24 }}>🧢</span>
+                            <div>
+                              <h4 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: '#ea580c' }}>
+                                ORANGE CAP (Most Runs)
+                              </h4>
+                              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Top run scorers across tournament</span>
+                            </div>
+                          </div>
+                          {orangeCap.length === 0 ? (
+                            <div style={{ padding: 20, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>No batting stats logged yet</div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              {orangeCap.slice(0, 5).map((b, idx) => (
+                                <div key={b.playerId + idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-secondary)', borderRadius: 6, fontSize: 12 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <span style={{ fontWeight: 800, color: idx === 0 ? '#ea580c' : 'var(--text-muted)', width: 16 }}>{idx + 1}</span>
+                                    <div>
+                                      <div style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{b.playerName}</div>
+                                      <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{b.teamName} · SR: {b.strikeRate}</div>
+                                    </div>
+                                  </div>
+                                  <div style={{ textAlign: 'right' }}>
+                                    <div style={{ fontWeight: 900, fontSize: 14, color: '#ea580c' }}>{b.runs} runs</div>
+                                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{b.ballsFaced}b, {b.fours}x4, {b.sixes}x6</div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Purple Cap (Top Wicket Takers) */}
+                        <div style={{
+                          background: 'linear-gradient(135deg, rgba(147, 51, 234, 0.08) 0%, var(--bg-card) 100%)',
+                          border: '1px solid rgba(147, 51, 234, 0.3)',
+                          borderRadius: 'var(--radius-md)',
+                          padding: 18,
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                            <span style={{ fontSize: 24 }}>🟣</span>
+                            <div>
+                              <h4 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: '#a855f7' }}>
+                                PURPLE CAP (Most Wickets)
+                              </h4>
+                              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Top wicket takers across tournament</span>
+                            </div>
+                          </div>
+                          {purpleCap.length === 0 ? (
+                            <div style={{ padding: 20, textAlign: 'center', fontSize: 12, color: 'var(--text-muted)' }}>No bowling stats logged yet</div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                              {purpleCap.slice(0, 5).map((bw, idx) => (
+                                <div key={bw.playerId + idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-secondary)', borderRadius: 6, fontSize: 12 }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                    <span style={{ fontWeight: 800, color: idx === 0 ? '#a855f7' : 'var(--text-muted)', width: 16 }}>{idx + 1}</span>
+                                    <div>
+                                      <div style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{bw.playerName}</div>
+                                      <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{bw.teamName} · Econ: {bw.economy}</div>
+                                    </div>
+                                  </div>
+                                  <div style={{ textAlign: 'right' }}>
+                                    <div style={{ fontWeight: 900, fontSize: 14, color: '#a855f7' }}>{bw.wickets} wkts</div>
+                                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{bw.runsConceded} runs ({bw.oversFormatted} ov)</div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })()}
@@ -2705,6 +3045,14 @@ export default function TournamentPublicView({ slug }: { slug: string }) {
         <MatchMediaModal 
           match={selectedMediaMatch} 
           onClose={() => setSelectedMediaMatch(null)} 
+        />
+      )}
+      {selectedCricketMatch && (
+        <CricketMatchModal
+          match={selectedCricketMatch}
+          tournament={tournament || undefined}
+          event={events.find(e => e.id === selectedCricketMatch.event_id)}
+          onClose={() => setSelectedCricketMatch(null)}
         />
       )}
     </div>

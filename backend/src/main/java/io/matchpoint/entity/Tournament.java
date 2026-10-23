@@ -63,8 +63,44 @@ public class Tournament {
     @Column(name = "bonus_point_value")
     private Integer bonusPointValue;
 
+    @Column(name = "age_cutoff_date")
+    private LocalDate ageCutoffDate;
+
+    @Column(name = "withdraw_date")
+    private LocalDate withdrawDate;
+
+    @Column(name = "admins", columnDefinition = "text[]")
+    private String[] admins;
+
+    @Column(name = "collects_fees")
+    private Boolean collectsFees = false;
+
+    @Column(name = "entry_fee")
+    private java.math.BigDecimal entryFee = java.math.BigDecimal.ZERO;
+
+    private String currency = "INR";
+
+    @Column(name = "sport")
+    private String sport = "badminton";
+
+    @Column(name = "platform_fee_percentage")
+    private java.math.BigDecimal platformFeePercentage = java.math.BigDecimal.valueOf(2.00);
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "payment_options", columnDefinition = "jsonb")
+    private List<PaymentOption> paymentOptions;
+
     @Column(name = "created_at", insertable = false, updatable = false)
     private LocalDateTime createdAt;
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class PaymentOption {
+        private String provider;
+        private Boolean enabled;
+        private java.util.Map<String, String> details;
+    }
 
     @Data
     @NoArgsConstructor

@@ -739,9 +739,10 @@ function UmpireDashboard() {
 export interface AdHocMatchModalProps {
   onClose: () => void;
   umpire: any;
+  onCreated?: (match: Match) => void;
 }
 
-export function AdHocMatchModal({ onClose, umpire }: AdHocMatchModalProps) {
+export function AdHocMatchModal({ onClose, umpire, onCreated }: AdHocMatchModalProps) {
   const router = useRouter();
   const { activeSport } = useSport();
   const [adhocSport, setAdhocSport] = useState<'badminton' | 'table_tennis' | 'squash' | 'tennis' | 'volleyball'>(
@@ -878,14 +879,17 @@ export function AdHocMatchModal({ onClose, umpire }: AdHocMatchModalProps) {
         player2IdCombined = `${id2}/${p2pId}`;
       }
 
+      // Validate umpire foreign key safely before sending
+      const validUmpireId = (umpire?.id && players.some(p => p.id === umpire.id)) ? umpire.id : null;
+
       const newMatch: Match = {
         id: `adhoc-m-${Date.now()}`,
         player1_id: player1IdCombined,
         player1_name: player1NameCombined,
         player2_id: player2IdCombined,
         player2_name: player2NameCombined,
-        umpire_id: umpire.id,
-        umpire_name: umpire.name,
+        umpire_id: validUmpireId,
+        umpire_name: umpire?.name || 'Official',
         court: court,
         status: 'scheduled',
         sport: adhocSport,
@@ -903,19 +907,40 @@ export function AdHocMatchModal({ onClose, umpire }: AdHocMatchModalProps) {
 
       const savedMatch = await dbService.createMatch(newMatch);
 
-      // Audit Log: Ad-hoc match created
-      await dbService.logAction(
-        'Ad-hoc Match Created',
-        'match',
-        `Umpire ${umpire.name} created an adhoc ${format} ${adhocType} match: ${player1NameCombined} vs ${player2NameCombined}`,
-        umpire
-      );
+      // Audit Log: Ad-hoc match created (non-blocking)
+      try {
+        await dbService.logAction(
+          'Ad-hoc Match Created',
+          'match',
+          `Umpire ${umpire?.name || 'Official'} created an adhoc ${format} ${adhocType} match: ${player1NameCombined} vs ${player2NameCombined}`,
+          umpire
+        );
+      } catch (logErr) {
+        console.warn('Failed to record audit log for ad-hoc match:', logErr);
+      }
 
-      // Redirect immediately to the scoring page using Next.js router
+      // Close modal first
+      onClose();
+
+      // If callback provided, notify caller
+      if (onCreated) {
+        onCreated(savedMatch);
+      }
+
+      // Seamlessly navigate to the live scoring interface
       router.push(`/dashboard/scoring?matchId=${savedMatch.id}`);
     } catch (err: any) {
-      console.error(err);
-      setError(err?.message || 'Failed to create ad-hoc match');
+      console.error('Ad-hoc match creation error:', err);
+      let errMsg = 'Failed to create ad-hoc match';
+      if (err?.message) {
+        try {
+          const parsed = JSON.parse(err.message);
+          errMsg = parsed.message || parsed.error || err.message;
+        } catch {
+          errMsg = err.message;
+        }
+      }
+      setError(errMsg);
       setSubmitting(false);
     }
   };

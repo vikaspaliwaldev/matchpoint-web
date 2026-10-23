@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Match, Tournament } from '@/types';
 import { getMatches, getTournaments } from '@/lib/supabase-service';
-import { VolleyballStanding, calculateVolleyballStandings } from '@/lib/sports-rules';
+import { VolleyballStanding, calculateVolleyballStandings, CricketMetadata, CricketInnings } from '@/lib/sports-rules';
 import { getTeamLogo } from '@/lib/team-logos';
 
 export default function ScoreboardClient() {
@@ -247,193 +247,396 @@ export default function ScoreboardClient() {
         </div>
       </div>
 
-      {/* Main Dual Team Scoring Board */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto minmax(0, 1fr)', gap: '2.5vw', alignItems: 'center', margin: '3vh 0', width: '100%', boxSizing: 'border-box' }}>
-        
-        {/* Team 1 Mega Card */}
-        <div style={{
-          background: servingTeam === 'player1' ? 'linear-gradient(135deg, rgba(30, 58, 138, 0.4), rgba(15, 23, 42, 0.9))' : 'rgba(15, 23, 42, 0.7)',
-          border: servingTeam === 'player1' ? '3px solid #38BDF8' : '1px solid rgba(255,255,255,0.1)',
-          borderRadius: '24px',
-          padding: '3.5vh 2.5vw',
-          textAlign: 'center',
-          boxShadow: servingTeam === 'player1' ? '0 0 50px rgba(56, 189, 248, 0.25)' : 'none',
-          position: 'relative',
-          minWidth: 0,
-          overflow: 'hidden',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-        }}>
-          {servingTeam === 'player1' && (
-            <div style={{ position: 'absolute', top: '1.5vh', left: '1.5vw', background: '#38BDF8', color: '#0F172A', padding: '0.4vh 0.8vw', borderRadius: '6px', fontSize: '0.9vw', fontWeight: '900', letterSpacing: '1px' }}>
-              🏐 SERVICE
-            </div>
-          )}
+      {/* Check if match is Cricket -> Render CricHeroes Stadium Big Screen */}
+      {match.sport === 'cricket' ? (() => {
+        const cMeta = (match.sport_metadata || {}) as CricketMetadata;
+        const currentInnNum = cMeta.current_innings || 1;
+        const inn: CricketInnings = currentInnNum === 1 ? (cMeta.innings_1 || ({} as any)) : (cMeta.innings_2 || cMeta.innings_1 || ({} as any));
+        const battingTeamName = inn.batting_team_name || match.player1_name;
+        const bowlingTeamName = inn.bowling_team_name || match.player2_name;
+        const totalRuns = inn.total_runs ?? 0;
+        const wickets = inn.wickets ?? 0;
+        const oversFormatted = inn.overs_formatted || '0.0';
+        const maxOvers = inn.max_overs || 20;
 
-          {getTeamLogo(match.player1_name) && (
-            <img
-              src={getTeamLogo(match.player1_name)!}
-              alt=""
-              style={{
-                width: '4.5vw',
-                height: '4.5vw',
-                borderRadius: '12px',
-                objectFit: 'cover',
-                border: '2px solid rgba(255,255,255,0.2)',
-                boxShadow: '0 4px 15px rgba(0,0,0,0.4)',
-                marginBottom: '0.8vh',
-              }}
-            />
-          )}
+        const striker = inn.batters?.[cMeta.striker_id] || { player_name: cMeta.striker_name || 'Striker', runs: 0, balls_faced: 0, fours: 0, sixes: 0, batting_style: cMeta.striker_batting_style || 'RHB' };
+        const nonStriker = inn.batters?.[cMeta.non_striker_id] || { player_name: cMeta.non_striker_name || 'Non-Striker', runs: 0, balls_faced: 0, fours: 0, sixes: 0, batting_style: cMeta.non_striker_batting_style || 'RHB' };
+        const bowler = inn.bowlers?.[cMeta.bowler_id] || { player_name: cMeta.bowler_name || 'Bowler', overs: 0, runs_conceded: 0, wickets: 0, economy: 0 };
 
-          <div
-            title={match.player1_name}
-            style={{
-              fontSize: 'clamp(18px, 2.5vw, 36px)',
-              fontWeight: '900',
-              color: '#FFFFFF',
-              marginTop: '0.5vh',
-              marginBottom: '1vh',
-              maxWidth: '100%',
-              wordBreak: 'break-word',
-              overflowWrap: 'break-word',
-              display: '-webkit-box',
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: 'vertical',
-              overflow: 'hidden',
-              lineHeight: 1.2,
-            }}
-          >
-            {match.player1_name}
-          </div>
+        const target = inn.target_runs;
+        const ballsRemaining = Math.max(0, (maxOvers * 6) - (inn.balls_bowled || 0));
+        const runsNeeded = target ? Math.max(0, target - totalRuns) : 0;
+        const crr = inn.balls_bowled > 0 ? (totalRuns / (inn.balls_bowled / 6)).toFixed(2) : '0.00';
+        const rrr = currentInnNum === 2 && target && ballsRemaining > 0 ? ((runsNeeded / ballsRemaining) * 6).toFixed(2) : '0.00';
 
-          <div style={{ fontSize: '1.4vw', color: '#94A3B8', fontWeight: '700' }}>
-            SETS WON: <span style={{ color: '#38BDF8', fontSize: '2vw' }}>{p1SetsWon}</span>
-          </div>
+        const deliveries = inn.deliveries || [];
+        const thisOverBalls = deliveries.slice(-6);
 
-          <div style={{ fontSize: '14vw', fontWeight: '900', lineHeight: '1', color: '#38BDF8', margin: '2vh 0', fontVariantNumeric: 'tabular-nums' }}>
-            {activeSet.player1_score}
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.8vw' }}>
-            <span style={{ fontSize: '1vw', color: '#64748B', fontWeight: '700' }}>TIMEOUTS:</span>
-            {[1, 2].map(n => (
-              <div key={n} style={{ width: '1.2vw', height: '1.2vw', borderRadius: '50%', background: n <= timeoutsP1 ? '#EF4444' : 'rgba(255,255,255,0.15)' }} />
-            ))}
-          </div>
-        </div>
-
-        {/* Center Set Summary Board */}
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2vh', minWidth: '15vw' }}>
-          <div style={{ fontSize: '2vw', fontWeight: '900', color: '#64748B', letterSpacing: '4px' }}>
-            SET {activeSet.set_number}
-          </div>
-
-          <div style={{ background: 'rgba(15, 23, 42, 0.9)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '16px', padding: '2vh 1.5vw', width: '100%', boxSizing: 'border-box' }}>
-            <div style={{ fontSize: '0.9vw', color: '#94A3B8', fontWeight: '800', textAlign: 'center', marginBottom: '1.5vh', letterSpacing: '1px' }}>
-              COMPLETED SETS
-            </div>
-            {sets.map(s => (
-              <div key={s.set_number} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.8vh 1vw', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: '1.3vw', fontWeight: s.is_complete ? '700' : '900', color: s.is_complete ? '#94A3B8' : '#38BDF8' }}>
-                <span>SET {s.set_number}</span>
-                <span style={{ fontVariantNumeric: 'tabular-nums' }}>{s.player1_score} - {s.player2_score}</span>
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '3vh', margin: '2vh 0', width: '100%' }}>
+            {/* Mega Cricket Scoreboard Banner */}
+            <div style={{
+              background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)',
+              border: '2px solid #ea580c',
+              borderRadius: '24px',
+              padding: '3vh 3vw',
+              display: 'grid',
+              gridTemplateColumns: '1.2fr 1.6fr 1.2fr',
+              alignItems: 'center',
+              gap: '2vw',
+              boxShadow: '0 0 60px rgba(234, 88, 12, 0.25)',
+            }}>
+              {/* Batting Team Column */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1vh' }}>
+                <span style={{ fontSize: '1.1vw', fontWeight: 800, color: '#ea580c', textTransform: 'uppercase', letterSpacing: '2px' }}>
+                  🏏 BATTING TEAM · INNINGS {currentInnNum}
+                </span>
+                <div style={{ fontSize: 'clamp(24px, 3.2vw, 48px)', fontWeight: 900, color: '#ffffff', lineHeight: 1.1 }}>
+                  {battingTeamName}
+                </div>
+                {target && currentInnNum === 2 && (
+                  <div style={{ fontSize: '1.4vw', fontWeight: 800, color: '#facc15' }}>
+                    TARGET: {target} <span style={{ fontSize: '1.1vw', color: '#94a3b8' }}>(Need {runsNeeded} off {ballsRemaining}b)</span>
+                  </div>
+                )}
+                {cMeta.toss_winner_id && (
+                  <div style={{ fontSize: '0.9vw', color: '#94a3b8' }}>
+                    Toss: {cMeta.toss_winner_id === 'player1' ? match.player1_name : match.player2_name} elected to {cMeta.toss_decision}
+                  </div>
+                )}
               </div>
-            ))}
-          </div>
-        </div>
 
-        {/* Team 2 Mega Card */}
-        <div style={{
-          background: servingTeam === 'player2' ? 'linear-gradient(135deg, rgba(30, 58, 138, 0.4), rgba(15, 23, 42, 0.9))' : 'rgba(15, 23, 42, 0.7)',
-          border: servingTeam === 'player2' ? '3px solid #38BDF8' : '1px solid rgba(255,255,255,0.1)',
-          borderRadius: '24px',
-          padding: '3.5vh 2.5vw',
-          textAlign: 'center',
-          boxShadow: servingTeam === 'player2' ? '0 0 50px rgba(56, 189, 248, 0.25)' : 'none',
-          position: 'relative',
-          minWidth: 0,
-          overflow: 'hidden',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-        }}>
-          {servingTeam === 'player2' && (
-            <div style={{ position: 'absolute', top: '1.5vh', right: '1.5vw', background: '#38BDF8', color: '#0F172A', padding: '0.4vh 0.8vw', borderRadius: '6px', fontSize: '0.9vw', fontWeight: '900', letterSpacing: '1px' }}>
-              🏐 SERVICE
+              {/* Center Runs / Wickets & Overs */}
+              <div style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                <div style={{ fontSize: '9vw', fontWeight: 900, color: '#38bdf8', lineHeight: 1, fontVariantNumeric: 'tabular-nums', textShadow: '0 0 40px rgba(56, 189, 248, 0.4)' }}>
+                  {totalRuns}/{wickets}
+                </div>
+                <div style={{ fontSize: '2.5vw', fontWeight: 800, color: '#ffffff', marginTop: '0.5vh' }}>
+                  OVERS: <span style={{ color: '#facc15' }}>{oversFormatted}</span> / {maxOvers}
+                </div>
+                <div style={{ display: 'flex', gap: '2vw', marginTop: '1vh', fontSize: '1.2vw', fontWeight: 800 }}>
+                  <span style={{ color: '#94a3b8' }}>CRR: <strong style={{ color: '#38bdf8' }}>{crr}</strong></span>
+                  {currentInnNum === 2 && target && (
+                    <span style={{ color: '#94a3b8' }}>RRR: <strong style={{ color: '#f43f5e' }}>{rrr}</strong></span>
+                  )}
+                </div>
+              </div>
+
+              {/* Bowling Team Column */}
+              <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', gap: '1vh' }}>
+                <span style={{ fontSize: '1.1vw', fontWeight: 800, color: '#34d399', textTransform: 'uppercase', letterSpacing: '2px' }}>
+                  🔴 FIELDING TEAM
+                </span>
+                <div style={{ fontSize: 'clamp(24px, 3.2vw, 48px)', fontWeight: 900, color: '#ffffff', lineHeight: 1.1 }}>
+                  {bowlingTeamName}
+                </div>
+                <div style={{ fontSize: '1.2vw', color: '#94a3b8', fontWeight: 700 }}>
+                  FORMAT: <span style={{ color: '#ffffff' }}>{cMeta.format?.toUpperCase() || 'T20'}</span> ({maxOvers} Ov)
+                </div>
+              </div>
+            </div>
+
+            {/* Active Players & This Over Ribbon */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1.8fr 1.2fr', gap: '2vw' }}>
+              {/* Batters & Bowler Card */}
+              <div style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '20px', padding: '2.5vh 2vw', display: 'flex', flexDirection: 'column', gap: '1.8vh' }}>
+                {/* Batters */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5vw' }}>
+                  {/* Striker */}
+                  <div style={{ background: 'rgba(56, 189, 248, 0.1)', border: '1px solid rgba(56, 189, 248, 0.3)', borderRadius: '14px', padding: '1.5vh 1.5vw' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '1.3vw', fontWeight: 900, color: '#38bdf8' }}>
+                        🏏 {striker.player_name} *
+                      </span>
+                      <span style={{ fontSize: '0.9vw', padding: '2px 8px', borderRadius: 4, background: 'rgba(56,189,248,0.2)', color: '#38bdf8', fontWeight: 800 }}>
+                        {striker.batting_style || 'RHB'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '2.8vw', fontWeight: 900, color: '#ffffff', margin: '0.5vh 0' }}>
+                      {striker.runs} <span style={{ fontSize: '1.4vw', color: '#94a3b8' }}>({striker.balls_faced}b)</span>
+                    </div>
+                    <div style={{ fontSize: '1vw', color: '#94a3b8', fontWeight: 700 }}>
+                      4s: {striker.fours || 0} · 6s: {striker.sixes || 0}
+                    </div>
+                  </div>
+
+                  {/* Non-Striker */}
+                  <div style={{ background: 'rgba(255, 255, 255, 0.04)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: '14px', padding: '1.5vh 1.5vw' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '1.3vw', fontWeight: 900, color: '#cbd5e1' }}>
+                        {nonStriker.player_name}
+                      </span>
+                      <span style={{ fontSize: '0.9vw', padding: '2px 8px', borderRadius: 4, background: 'rgba(255,255,255,0.1)', color: '#94a3b8', fontWeight: 800 }}>
+                        {nonStriker.batting_style || 'RHB'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '2.8vw', fontWeight: 900, color: '#cbd5e1', margin: '0.5vh 0' }}>
+                      {nonStriker.runs} <span style={{ fontSize: '1.4vw', color: '#64748b' }}>({nonStriker.balls_faced}b)</span>
+                    </div>
+                    <div style={{ fontSize: '1vw', color: '#64748b', fontWeight: 700 }}>
+                      4s: {nonStriker.fours || 0} · 6s: {nonStriker.sixes || 0}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Bowler Details */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(52, 211, 153, 0.08)', border: '1px solid rgba(52, 211, 153, 0.25)', borderRadius: '12px', padding: '1.2vh 1.5vw' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.8vw' }}>
+                    <span style={{ fontSize: '1.2vw' }}>🔴</span>
+                    <span style={{ fontSize: '1.3vw', fontWeight: 900, color: '#34d399' }}>
+                      Current Bowler: {bowler.player_name}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: '1.6vw', fontWeight: 900, color: '#ffffff', fontFamily: 'monospace' }}>
+                    {bowler.overs} ov · {bowler.wickets} wkts · {bowler.runs_conceded} runs
+                    <span style={{ fontSize: '1vw', color: '#94a3b8', marginLeft: '1vw' }}>Econ: {bowler.economy || '0.0'}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* This Over Ball-by-Ball Strip */}
+              <div style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: '20px', padding: '2.5vh 2vw', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                <div>
+                  <div style={{ fontSize: '1.1vw', fontWeight: 800, color: '#38bdf8', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: '1.5vh' }}>
+                    THIS OVER DELIVERIES
+                  </div>
+                  {thisOverBalls.length === 0 ? (
+                    <div style={{ fontSize: '1.3vw', color: '#64748b', fontStyle: 'italic', padding: '2vh 0' }}>
+                      Over waiting to commence
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', gap: '1vw', flexWrap: 'wrap', alignItems: 'center' }}>
+                      {thisOverBalls.map((b, i) => {
+                        const isW = b.is_wicket;
+                        const isSix = b.runs_off_bat === 6;
+                        const isFour = b.runs_off_bat === 4;
+                        const isExtra = !b.is_legal;
+                        const bg = isW ? '#ef4444' : isSix ? '#8b5cf6' : isFour ? '#10b981' : isExtra ? '#f59e0b' : 'rgba(255,255,255,0.15)';
+                        const label = isW ? 'W' : b.extra_type ? `${b.total_runs}${b.extra_type === 'wide' ? 'wd' : 'nb'}` : `${b.runs_off_bat}`;
+
+                        return (
+                          <div
+                            key={i}
+                            style={{
+                              width: '3.6vw',
+                              height: '3.6vw',
+                              borderRadius: '50%',
+                              background: bg,
+                              color: '#ffffff',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontSize: '1.4vw',
+                              fontWeight: 900,
+                              boxShadow: '0 4px 15px rgba(0,0,0,0.5)',
+                            }}
+                          >
+                            {label}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ fontSize: '1vw', color: '#94a3b8', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '1vh' }}>
+                  🏟️ Stadium Big Screen Feed · CricHeroes Engine
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })() : (
+        <>
+          {/* Main Dual Team Scoring Board for Volleyball / Racket Sports */}
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto minmax(0, 1fr)', gap: '2.5vw', alignItems: 'center', margin: '3vh 0', width: '100%', boxSizing: 'border-box' }}>
+            
+            {/* Team 1 Mega Card */}
+            <div style={{
+              background: servingTeam === 'player1' ? 'linear-gradient(135deg, rgba(30, 58, 138, 0.4), rgba(15, 23, 42, 0.9))' : 'rgba(15, 23, 42, 0.7)',
+              border: servingTeam === 'player1' ? '3px solid #38BDF8' : '1px solid rgba(255,255,255,0.1)',
+              borderRadius: '24px',
+              padding: '3.5vh 2.5vw',
+              textAlign: 'center',
+              boxShadow: servingTeam === 'player1' ? '0 0 50px rgba(56, 189, 248, 0.25)' : 'none',
+              position: 'relative',
+              minWidth: 0,
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+            }}>
+              {servingTeam === 'player1' && (
+                <div style={{ position: 'absolute', top: '1.5vh', left: '1.5vw', background: '#38BDF8', color: '#0F172A', padding: '0.4vh 0.8vw', borderRadius: '6px', fontSize: '0.9vw', fontWeight: '900', letterSpacing: '1px' }}>
+                  🏐 SERVICE
+                </div>
+              )}
+
+              {getTeamLogo(match.player1_name) && (
+                <img
+                  src={getTeamLogo(match.player1_name)!}
+                  alt=""
+                  style={{
+                    width: '4.5vw',
+                    height: '4.5vw',
+                    borderRadius: '12px',
+                    objectFit: 'cover',
+                    border: '2px solid rgba(255,255,255,0.2)',
+                    boxShadow: '0 4px 15px rgba(0,0,0,0.4)',
+                    marginBottom: '0.8vh',
+                  }}
+                />
+              )}
+
+              <div
+                title={match.player1_name}
+                style={{
+                  fontSize: 'clamp(18px, 2.5vw, 36px)',
+                  fontWeight: '900',
+                  color: '#FFFFFF',
+                  marginTop: '0.5vh',
+                  marginBottom: '1vh',
+                  maxWidth: '100%',
+                  wordBreak: 'break-word',
+                  overflowWrap: 'break-word',
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical',
+                  overflow: 'hidden',
+                  lineHeight: 1.2,
+                }}
+              >
+                {match.player1_name}
+              </div>
+
+              <div style={{ fontSize: '1.4vw', color: '#94A3B8', fontWeight: '700' }}>
+                SETS WON: <span style={{ color: '#38BDF8', fontSize: '2vw' }}>{p1SetsWon}</span>
+              </div>
+
+              <div style={{ fontSize: '14vw', fontWeight: '900', lineHeight: '1', color: '#38BDF8', margin: '2vh 0', fontVariantNumeric: 'tabular-nums' }}>
+                {activeSet.player1_score}
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.8vw' }}>
+                <span style={{ fontSize: '1vw', color: '#64748B', fontWeight: '700' }}>TIMEOUTS:</span>
+                {[1, 2].map(n => (
+                  <div key={n} style={{ width: '1.2vw', height: '1.2vw', borderRadius: '50%', background: n <= timeoutsP1 ? '#EF4444' : 'rgba(255,255,255,0.15)' }} />
+                ))}
+              </div>
+            </div>
+
+            {/* Center Set Summary Board */}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2vh', minWidth: '15vw' }}>
+              <div style={{ fontSize: '2vw', fontWeight: '900', color: '#64748B', letterSpacing: '4px' }}>
+                SET {activeSet.set_number}
+              </div>
+
+              <div style={{ background: 'rgba(15, 23, 42, 0.9)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '16px', padding: '2vh 1.5vw', width: '100%', boxSizing: 'border-box' }}>
+                <div style={{ fontSize: '0.9vw', color: '#94A3B8', fontWeight: '800', textAlign: 'center', marginBottom: '1.5vh', letterSpacing: '1px' }}>
+                  COMPLETED SETS
+                </div>
+                {sets.map(s => (
+                  <div key={s.set_number} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.8vh 1vw', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: '1.3vw', fontWeight: s.is_complete ? '700' : '900', color: s.is_complete ? '#94A3B8' : '#38BDF8' }}>
+                    <span>SET {s.set_number}</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums' }}>{s.player1_score} - {s.player2_score}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Team 2 Mega Card */}
+            <div style={{
+              background: servingTeam === 'player2' ? 'linear-gradient(135deg, rgba(30, 58, 138, 0.4), rgba(15, 23, 42, 0.9))' : 'rgba(15, 23, 42, 0.7)',
+              border: servingTeam === 'player2' ? '3px solid #38BDF8' : '1px solid rgba(255,255,255,0.1)',
+              borderRadius: '24px',
+              padding: '3.5vh 2.5vw',
+              textAlign: 'center',
+              boxShadow: servingTeam === 'player2' ? '0 0 50px rgba(56, 189, 248, 0.25)' : 'none',
+              position: 'relative',
+              minWidth: 0,
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+            }}>
+              {servingTeam === 'player2' && (
+                <div style={{ position: 'absolute', top: '1.5vh', right: '1.5vw', background: '#38BDF8', color: '#0F172A', padding: '0.4vh 0.8vw', borderRadius: '6px', fontSize: '0.9vw', fontWeight: '900', letterSpacing: '1px' }}>
+                  🏐 SERVICE
+                </div>
+              )}
+
+              {getTeamLogo(match.player2_name) && (
+                <img
+                  src={getTeamLogo(match.player2_name)!}
+                  alt=""
+                  style={{
+                    width: '4.5vw',
+                    height: '4.5vw',
+                    borderRadius: '12px',
+                    objectFit: 'cover',
+                    border: '2px solid rgba(255,255,255,0.2)',
+                    boxShadow: '0 4px 15px rgba(0,0,0,0.4)',
+                    marginBottom: '0.8vh',
+                  }}
+                />
+              )}
+
+              <div
+                title={match.player2_name}
+                style={{
+                  fontSize: 'clamp(18px, 2.5vw, 36px)',
+                  fontWeight: '900',
+                  color: '#FFFFFF',
+                  marginTop: '0.5vh',
+                  marginBottom: '1vh',
+                  maxWidth: '100%',
+                  wordBreak: 'break-word',
+                  overflowWrap: 'break-word',
+                  display: '-webkit-box',
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: 'vertical',
+                  overflow: 'hidden',
+                  lineHeight: 1.2,
+                }}
+              >
+                {match.player2_name}
+              </div>
+
+              <div style={{ fontSize: '1.4vw', color: '#94A3B8', fontWeight: '700' }}>
+                SETS WON: <span style={{ color: '#38BDF8', fontSize: '2vw' }}>{p2SetsWon}</span>
+              </div>
+
+              <div style={{ fontSize: '14vw', fontWeight: '900', lineHeight: '1', color: '#38BDF8', margin: '2vh 0', fontVariantNumeric: 'tabular-nums' }}>
+                {activeSet.player2_score}
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.8vw' }}>
+                <span style={{ fontSize: '1vw', color: '#64748B', fontWeight: '700' }}>TIMEOUTS:</span>
+                {[1, 2].map(n => (
+                  <div key={n} style={{ width: '1.2vw', height: '1.2vw', borderRadius: '50%', background: n <= timeoutsP2 ? '#EF4444' : 'rgba(255,255,255,0.15)' }} />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Bottom Ticker / Standings Preview */}
+          {standings.length > 0 && (
+            <div style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '14px', padding: '1.5vh 2vw', display: 'flex', alignItems: 'center', gap: '3vw', overflow: 'hidden' }}>
+              <div style={{ fontSize: '1vw', fontWeight: '900', color: '#38BDF8', letterSpacing: '2px', whiteSpace: 'nowrap' }}>
+                FIVB STANDINGS:
+              </div>
+              <div style={{ display: 'flex', gap: '2vw', overflowX: 'auto', flex: 1 }}>
+                {standings.slice(0, 4).map((st, idx) => (
+                  <div key={st.teamId} style={{ fontSize: '1.1vw', whiteSpace: 'nowrap' }}>
+                    <span style={{ color: '#64748B', fontWeight: '700' }}>#{idx + 1}</span>{' '}
+                    <span style={{ fontWeight: '700', color: '#FFFFFF' }}>{st.teamName}</span>{' '}
+                    <span style={{ color: '#38BDF8', fontWeight: '800' }}>({st.points} pts, {st.won}W-{st.lost}L)</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
-
-          {getTeamLogo(match.player2_name) && (
-            <img
-              src={getTeamLogo(match.player2_name)!}
-              alt=""
-              style={{
-                width: '4.5vw',
-                height: '4.5vw',
-                borderRadius: '12px',
-                objectFit: 'cover',
-                border: '2px solid rgba(255,255,255,0.2)',
-                boxShadow: '0 4px 15px rgba(0,0,0,0.4)',
-                marginBottom: '0.8vh',
-              }}
-            />
-          )}
-
-          <div
-            title={match.player2_name}
-            style={{
-              fontSize: 'clamp(18px, 2.5vw, 36px)',
-              fontWeight: '900',
-              color: '#FFFFFF',
-              marginTop: '0.5vh',
-              marginBottom: '1vh',
-              maxWidth: '100%',
-              wordBreak: 'break-word',
-              overflowWrap: 'break-word',
-              display: '-webkit-box',
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: 'vertical',
-              overflow: 'hidden',
-              lineHeight: 1.2,
-            }}
-          >
-            {match.player2_name}
-          </div>
-
-          <div style={{ fontSize: '1.4vw', color: '#94A3B8', fontWeight: '700' }}>
-            SETS WON: <span style={{ color: '#38BDF8', fontSize: '2vw' }}>{p2SetsWon}</span>
-          </div>
-
-          <div style={{ fontSize: '14vw', fontWeight: '900', lineHeight: '1', color: '#38BDF8', margin: '2vh 0', fontVariantNumeric: 'tabular-nums' }}>
-            {activeSet.player2_score}
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '0.8vw' }}>
-            <span style={{ fontSize: '1vw', color: '#64748B', fontWeight: '700' }}>TIMEOUTS:</span>
-            {[1, 2].map(n => (
-              <div key={n} style={{ width: '1.2vw', height: '1.2vw', borderRadius: '50%', background: n <= timeoutsP2 ? '#EF4444' : 'rgba(255,255,255,0.15)' }} />
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Bottom Ticker / Standings Preview */}
-      {standings.length > 0 && (
-        <div style={{ background: 'rgba(15, 23, 42, 0.8)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '14px', padding: '1.5vh 2vw', display: 'flex', alignItems: 'center', gap: '3vw', overflow: 'hidden' }}>
-          <div style={{ fontSize: '1vw', fontWeight: '900', color: '#38BDF8', letterSpacing: '2px', whiteSpace: 'nowrap' }}>
-            FIVB STANDINGS:
-          </div>
-          <div style={{ display: 'flex', gap: '2vw', overflowX: 'auto', flex: 1 }}>
-            {standings.slice(0, 4).map((st, idx) => (
-              <div key={st.teamId} style={{ fontSize: '1.1vw', whiteSpace: 'nowrap' }}>
-                <span style={{ color: '#64748B', fontWeight: '700' }}>#{idx + 1}</span>{' '}
-                <span style={{ fontWeight: '700', color: '#FFFFFF' }}>{st.teamName}</span>{' '}
-                <span style={{ color: '#38BDF8', fontWeight: '800' }}>({st.points} pts, {st.won}W-{st.lost}L)</span>
-              </div>
-            ))}
-          </div>
-        </div>
+        </>
       )}
     </div>
   );

@@ -19,12 +19,15 @@ public class ActivityLog {
     private UUID id;
 
     @Column(name = "user_id")
+    @com.fasterxml.jackson.annotation.JsonAlias({"userId", "user_id"})
     private String userId;
 
     @Column(name = "user_name")
+    @com.fasterxml.jackson.annotation.JsonAlias({"userName", "user_name"})
     private String userName;
 
     @Column(name = "activity_type", nullable = false)
+    @com.fasterxml.jackson.annotation.JsonAlias({"activityType", "activity_type"})
     private String activityType; // 'PAGE_VIEW', 'CREATE_TOURNAMENT', etc.
 
     @Column(columnDefinition = "TEXT")

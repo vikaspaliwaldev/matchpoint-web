@@ -16,6 +16,7 @@ public class AuditLogController {
     private final AuditLogRepository auditLogRepository;
 
     @GetMapping
+    @org.springframework.security.access.prepost.PreAuthorize("hasRole('SYSTEM_ADMIN')")
     public List<AuditLog> getAllAuditLogs(@RequestParam(required = false) String category) {
         if (category != null && !category.trim().isEmpty() && !category.equals("all")) {
             return auditLogRepository.findByCategoryOrderByCreatedAtDesc(category);

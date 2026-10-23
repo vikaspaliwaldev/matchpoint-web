@@ -8,4 +8,5 @@ import java.util.List;
 @Repository
 public interface TournamentEventRepository extends JpaRepository<TournamentEvent, String> {
     List<TournamentEvent> findByTournamentId(String tournamentId);
+    boolean existsByTournamentIdAndMasterEventId(String tournamentId, String masterEventId);
 }

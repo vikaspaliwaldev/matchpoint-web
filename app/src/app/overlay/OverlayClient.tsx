@@ -6,6 +6,7 @@ import { Match } from '@/types';
 import { getMatches } from '@/lib/supabase-service';
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 import { formatTennisGameScore, getTableTennisServer } from '@/lib/sports-rules';
+import CricketOverlayClient from './cricket/CricketOverlayClient';
 
 /**
  * OBS Score Overlay Page
@@ -197,6 +198,11 @@ export default function OverlayPage() {
         Waiting for match...
       </div>
     );
+  }
+
+  // ─── Cricket Broadcast Mode (CricHeroes Style) ───
+  if (match.sport === 'cricket') {
+    return <CricketOverlayClient />;
   }
 
   // ─── Compact Single-Line Mode ───

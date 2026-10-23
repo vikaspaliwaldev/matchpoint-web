@@ -33,7 +33,10 @@ public class EventController {
     }
 
     @PostMapping
-    public ResponseEntity<TournamentEvent> createEvent(@RequestBody TournamentEvent event) {
+    public ResponseEntity<?> createEvent(@RequestBody TournamentEvent event) {
+        if (eventRepository.existsByTournamentIdAndMasterEventId(event.getTournamentId(), event.getMasterEventId())) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body("Event template already added to this tournament");
+        }
         TournamentEvent saved = eventRepository.save(event);
         return ResponseEntity.status(HttpStatus.CREATED).body(saved);
     }

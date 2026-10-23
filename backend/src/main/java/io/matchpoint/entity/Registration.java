@@ -41,4 +41,22 @@ public class Registration {
     private LocalDateTime registeredAt;
 
     private Integer seed;
+
+    @Column(name = "payment_status")
+    private String paymentStatus = "unpaid"; // 'unpaid', 'pending', 'paid', 'refunded', 'exempt'
+
+    @Column(name = "payment_method")
+    private String paymentMethod = "stripe"; // 'stripe', 'offline'
+
+    @Column(name = "partner_name")
+    private String partnerName;
+
+    @Column(name = "partner_email")
+    private String partnerEmail;
+
+    @Column(name = "partner_gender")
+    private String partnerGender;
+
+    @Column(name = "partner_age")
+    private Integer partnerAge;
 }

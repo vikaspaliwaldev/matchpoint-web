@@ -22,13 +22,22 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require
-      - SPRING_DATASOURCE_USERNAME=postgres.pcfwdibqnpvikdntgypw
-      - SPRING_DATASOURCE_PASSWORD=Weekend@30303131
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://db:5432/postgres
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=postgres
+      - SPRING_JPA_HIBERNATE_DDL_AUTO=none
       - JWT_SECRET=dGhpcy1pcy1hLXNlY3VyZS1zaWduaW5nLWtleS1mb3ItbWF0Y2hwb2ludC1iYWRtaW50b24tbGVhZ3VlLXN5c3RlbS1iYWNrZW5kLXByb2plY3Q=
+    volumes:
+      - ./logs:/app/logs
     depends_on:
       - db
     restart: always
 
 volumes:
   pgdata:
+
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: "1350"

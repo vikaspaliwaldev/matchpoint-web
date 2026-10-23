@@ -27,6 +27,9 @@ public class Team {
     @Column(name = "captain_id")
     private String captainId;
 
+    @Column(name = "logo_url")
+    private String logoUrl;
+
     // Maps PostgreSQL TEXT[] natively in Hibernate 6
     @Column(name = "players", columnDefinition = "text[]")
     private String[] players;

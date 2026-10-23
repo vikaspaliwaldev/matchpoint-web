@@ -136,7 +136,35 @@ export async function getTournaments(): Promise<Tournament[]> {
     return mock.mockTournaments;
   }
   try {
-    const data = await apiFetch<Tournament[]>('/tournaments');
+    const rawData = await apiFetch<any[]>('/tournaments');
+    const data: Tournament[] = rawData.map(t => ({
+      id: t.id,
+      name: t.name,
+      slug: t.slug,
+      description: t.description,
+      location: t.location,
+      banner: t.banner,
+      start_date: t.start_date || t.startDate,
+      end_date: t.end_date || t.endDate,
+      type: t.type,
+      status: t.status,
+      sport: t.sport || 'badminton',
+      created_by: t.created_by || t.createdBy,
+      created_at: t.created_at || t.createdAt,
+      team_size_limit: t.team_size_limit || t.teamSizeLimit,
+      team_tie_events: t.team_tie_events || t.teamTieEvents,
+      team_tie_configs: t.team_tie_configs || t.teamTieConfigs,
+      bonus_point_margin: t.bonus_point_margin || t.bonusPointMargin,
+      bonus_point_value: t.bonus_point_value || t.bonusPointValue,
+      age_cutoff_date: t.age_cutoff_date || t.ageCutoffDate,
+      withdraw_date: t.withdraw_date || t.withdrawDate,
+      admins: t.admins,
+      collects_fees: t.collects_fees ?? t.collectsFees,
+      entry_fee: t.entry_fee ?? t.entryFee,
+      currency: t.currency,
+      payment_options: t.payment_options || t.paymentOptions,
+      cricket_config: t.cricket_config || t.cricketConfig,
+    }));
     data.sort((a, b) => new Date(b.start_date).getTime() - new Date(a.start_date).getTime());
     logClientActivity('PAGE_VIEW', 'Viewed tournaments dashboard');
     return data;
@@ -1124,6 +1152,65 @@ export async function updatePlayerProfile(id: string, profile: Partial<User> & {
   }
 }
 
+export async function createOrGetPlayerProfile(profileData: {
+  id?: string;
+  name: string;
+  email: string;
+  phone?: string;
+  gender?: string;
+  age?: number;
+  date_of_birth?: string;
+}): Promise<User> {
+  if (!isSupabaseConfigured) {
+    const existing = mock.mockUsers.find(u => u.email.toLowerCase() === profileData.email.toLowerCase());
+    if (existing) return existing;
+    const newUser: User = {
+      id: profileData.id || `u-${Date.now()}`,
+      name: profileData.name,
+      email: profileData.email,
+      phone: profileData.phone || '',
+      role: 'player',
+      roles: ['player'],
+      gender: profileData.gender,
+      age: profileData.age,
+      created_at: new Date().toISOString(),
+    };
+    mock.mockUsers.push(newUser);
+    return newUser;
+  }
+  try {
+    const data = await apiFetch<any>('/profiles', {
+      method: 'POST',
+      body: JSON.stringify({
+        id: profileData.id,
+        name: profileData.name,
+        email: profileData.email,
+        phone: profileData.phone,
+        gender: profileData.gender,
+        age: profileData.age,
+        dateOfBirth: profileData.date_of_birth,
+        roles: ['player'],
+      }),
+    });
+    return {
+      id: data.id,
+      email: data.email,
+      name: data.name,
+      phone: data.phone,
+      roles: data.roles || ['player'],
+      role: 'player',
+      avatar: data.avatar,
+      age: data.age,
+      gender: data.gender,
+      date_of_birth: data.dateOfBirth || data.date_of_birth,
+      created_at: data.createdAt || data.created_at,
+    } as User;
+  } catch (err) {
+    console.error('createOrGetPlayerProfile REST API error:', err);
+    throw err;
+  }
+}
+
 export async function getAllProfiles(): Promise<User[]> {
   if (!isSupabaseConfigured) {
     return mock.mockUsers;
@@ -1217,7 +1304,26 @@ export async function getEvents(): Promise<TournamentEvent[]> {
     return mock.mockEvents;
   }
   try {
-    const data = await apiFetch<TournamentEvent[]>('/events');
+    const rawData = await apiFetch<any[]>('/events');
+    const data: TournamentEvent[] = rawData.map(e => ({
+      id: e.id,
+      tournament_id: e.tournament_id || e.tournamentId,
+      master_event_id: e.master_event_id || e.masterEventId,
+      event_name: e.event_name || e.eventName || (e.masterEvent ? e.masterEvent.name : 'Event'),
+      category: e.category || (e.masterEvent ? e.masterEvent.category : 'Open'),
+      entry_limit: e.entry_limit || e.entryLimit || 32,
+      format: e.format || 'knockout',
+      scoring_format: e.scoring_format || e.scoringFormat || '21-point',
+      sport: e.sport || 'badminton',
+      registrations_count: e.registrations_count || e.registrationsCount || 0,
+      entry_fee: e.entry_fee || e.entryFee,
+      gender_restriction: e.gender_restriction || e.genderRestriction,
+      age_limit: e.age_limit || e.ageLimit,
+      age_restriction_type: e.age_restriction_type || e.ageRestrictionType,
+      gender: e.gender || (e.masterEvent ? e.masterEvent.gender : undefined),
+      min_age: e.min_age || e.minAge || (e.masterEvent ? e.masterEvent.min_age : undefined),
+      max_age: e.max_age || e.maxAge || (e.masterEvent ? e.masterEvent.max_age : undefined),
+    }));
     return data;
   } catch (err) {
     console.error('getEvents REST API error, falling back to mock:', err);
@@ -1230,7 +1336,25 @@ export async function getRegistrations(): Promise<Registration[]> {
     return mock.mockRegistrations;
   }
   try {
-    const data = await apiFetch<Registration[]>('/registrations');
+    const rawData = await apiFetch<any[]>('/registrations');
+    const data: Registration[] = rawData.map(r => ({
+      id: r.id,
+      tournament_id: r.tournament_id || r.tournamentId,
+      event_id: r.event_id || r.eventId,
+      player_id: r.player_id || r.playerId,
+      player_name: r.player_name || r.playerName || 'Player',
+      player_email: r.player_email || r.playerEmail || '',
+      status: r.status,
+      registered_at: r.registered_at || r.registeredAt || new Date().toISOString(),
+      seed: r.seed,
+      disqualification_reason: r.disqualification_reason || r.disqualificationReason,
+      partner_name: r.partner_name || r.partnerName,
+      partner_email: r.partner_email || r.partnerEmail,
+      partner_gender: r.partner_gender || r.partnerGender,
+      partner_age: r.partner_age || r.partnerAge,
+      payment_status: r.payment_status || r.paymentStatus,
+      payment_method: r.payment_method || r.paymentMethod,
+    }));
     data.sort((a, b) => {
       const aTime = a.registered_at ? new Date(a.registered_at).getTime() : 0;
       const bTime = b.registered_at ? new Date(b.registered_at).getTime() : 0;

@@ -2,6 +2,7 @@ package io.matchpoint.entity;
 
 import jakarta.persistence.*;
 import lombok.*;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 @Entity
@@ -28,7 +29,15 @@ public class Profile {
     @Column(name = "roles", columnDefinition = "text[]")
     private String[] roles;
 
+    @Column(columnDefinition = "TEXT")
     private String avatar;
+
+    private Integer age;
+
+    private String gender;
+
+    @Column(name = "date_of_birth")
+    private LocalDate dateOfBirth;
 
     @Column(name = "password_hash")
     private String passwordHash;

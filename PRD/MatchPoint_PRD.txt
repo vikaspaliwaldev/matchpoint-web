@@ -527,4 +527,18 @@ Next, I would create:
 	•	REST API specification
 	•	UI wireframes
 	•	Sequence diagrams (registration → match → score → leaderboard)
+DB : Weekend@30303131
 
+while create signup it ask for all details including role player/umpire/organiser, ideally it should just ask for name, user id and password, and it userid does not exits i the system then it should allow to create as a new user
+once user login into application default role would be player and later admin can change user role using ui (we need to build that ui under admin section)
+upon login it should check if profile does not have age/phone/email/gender then it should open profile page and until user will not save those details, it should not allow anything to user.
+
+I am also thinking for another new role which is tournament organiser, once admin will assign a user as a tournament organiser then that use can work as a admin only for that tournament.
+
+as of now we are collecting user age under profile, but i think we should start using date of birth, and while creating new tournament we should set age cutoff date for that tournament, by default tournament start date would be cutoff date, this way we can calculate correct age of the player and allow them to register.
+
+also we can add a media  section where admin or tournament organiser can upload images related to that tournament 
+
+I am also planning to enhance our landing page so that unregister user can also see tournament detail/player details media gallery etc for better engagement.
+
+ please also suggest some idea which can make this application more user engaging, one example could be during the live score put the win predictor based on past history and match condition, if no history then give equal, but please suggest such options like blog/news user comment section while live match so that all online user can also chat and take it on next level 

@@ -16,6 +16,9 @@ public class RegisterRequest {
     @NotBlank(message = "Password is required")
     private String password;
 
+    // Legacy fields kept for backward compatibility but ignored during registration
     private String phone;
     private String[] roles;
+    private Integer age;
+    private String gender;
 }

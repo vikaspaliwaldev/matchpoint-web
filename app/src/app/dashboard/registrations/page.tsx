@@ -13,6 +13,7 @@ import {
   disqualifyPlayer,
   getPlayers,
   saveRegistrationsBatch,
+  createOrGetPlayerProfile,
 } from '@/lib/supabase-service';
 
 interface SearchableTournamentSelectProps {
@@ -172,9 +173,38 @@ function SearchableTournamentSelect({
 
 // ---- CSV Parsing & Age Calculation Helpers ----
 
+function parseDobToIso(dobString: string): string {
+  if (!dobString) return '';
+  const trimmed = dobString.trim();
+  // Check if DD/MM/YY or DD/MM/YYYY
+  const dmyMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (dmyMatch) {
+    const day = dmyMatch[1].padStart(2, '0');
+    const month = dmyMatch[2].padStart(2, '0');
+    let year = dmyMatch[3];
+    if (year.length === 2) {
+      // 00-49 -> 2000-2049, 50-99 -> 1950-1999
+      const yNum = parseInt(year, 10);
+      year = yNum <= 40 ? `20${year}` : `19${year}`;
+    }
+    return `${year}-${month}-${day}`;
+  }
+  // Check if already ISO YYYY-MM-DD
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (isoMatch) {
+    const year = isoMatch[1];
+    const month = isoMatch[2].padStart(2, '0');
+    const day = isoMatch[3].padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+  return trimmed;
+}
+
 function getCutoffAge(dobString: string, cutoffDateString?: string) {
   if (!dobString) return 0;
-  const dob = new Date(dobString);
+  const isoDob = parseDobToIso(dobString);
+  const dob = new Date(isoDob || dobString);
+  if (isNaN(dob.getTime())) return 0;
   const refDate = cutoffDateString ? new Date(cutoffDateString) : new Date();
   let age = refDate.getFullYear() - dob.getFullYear();
   const m = refDate.getMonth() - dob.getMonth();
@@ -399,19 +429,98 @@ export default function RegistrationsPage() {
 
     try {
       setIsSavingImport(true);
-      
-      const newRegistrations: Registration[] = importedRows.map((row, idx) => {
-        // Try to match player by email
-        const matchedPlayer = players.find(p => p.email.toLowerCase() === row.email.toLowerCase());
+
+      const selectedTournament = tournaments.find(t => t.id === importTournamentId);
+      const selectedEvent = events.find(e => e.id === importEventId);
+
+      // Pre-create or fetch profiles for all imported players so DB foreign keys succeed
+      const newRegistrations: Registration[] = [];
+      const localPlayers: User[] = [...players];
+
+      for (let idx = 0; idx < importedRows.length; idx++) {
+        const row = importedRows[idx];
+        const rowName = (row.name || '').trim();
+        const rowEmail = (row.email || '').trim().toLowerCase();
+        const rowDob = (row.dob || '').trim();
+        const rowPhone = (row.phone || '').trim();
+
+        const isoDob = parseDobToIso(rowDob);
+
+        // Determine if email in CSV is unique to this row or duplicated across rows
+        const isSharedOrPlaceholderEmail = !rowEmail || 
+          rowEmail.includes('example.com') || 
+          importedRows.filter(r => (r.email || '').trim().toLowerCase() === rowEmail).length > 1;
+
+        // Guaranteed unique email for new profiles or backend isolation
+        const effectiveEmail = isSharedOrPlaceholderEmail
+          ? `${rowName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'player'}.${Date.now()}.${idx}@matchpoint.internal`
+          : rowEmail;
+
+        // 1. Try to match player:
+        // - Primary: Same Name AND Same DOB (if both present)
+        // - Secondary: If email is unique (not placeholder or shared), match by email AND name
+        let matchedIndex = localPlayers.findIndex(p => {
+          const sameName = rowName && p.name && p.name.trim().toLowerCase() === rowName.toLowerCase();
+          if (sameName && isoDob && p.date_of_birth) {
+            const playerIsoDob = parseDobToIso(p.date_of_birth);
+            if (playerIsoDob === isoDob) return true;
+          }
+          if (!isSharedOrPlaceholderEmail && rowEmail && p.email && p.email.toLowerCase() === rowEmail) {
+            // Also ensure name matches to prevent overriding someone else's email
+            if (!p.name || sameName) return true;
+          }
+          return false;
+        });
+
+        let matchedPlayer: User | null = matchedIndex !== -1 ? localPlayers[matchedIndex] : null;
+
+        if (matchedPlayer) {
+          // 2. Player already exists: update email and/or mobile if provided in CSV
+          const needsEmailUpdate = !isSharedOrPlaceholderEmail && rowEmail && rowEmail !== matchedPlayer.email.toLowerCase();
+          const needsPhoneUpdate = rowPhone && rowPhone !== matchedPlayer.phone;
+          if (needsEmailUpdate || needsPhoneUpdate) {
+            try {
+              const updated = await createOrGetPlayerProfile({
+                id: matchedPlayer.id,
+                name: matchedPlayer.name,
+                email: (needsEmailUpdate ? rowEmail : matchedPlayer.email) || effectiveEmail,
+                phone: rowPhone || matchedPlayer.phone,
+                gender: row.gender || matchedPlayer.gender,
+                age: row.age ? Number(row.age) : matchedPlayer.age,
+                date_of_birth: isoDob || matchedPlayer.date_of_birth,
+              });
+              matchedPlayer = updated;
+              localPlayers[matchedIndex] = updated;
+            } catch (err) {
+              console.warn('Could not update player mobile/email:', err);
+            }
+          }
+        } else {
+          // 3. Player does not exist: create new profile
+          try {
+            matchedPlayer = await createOrGetPlayerProfile({
+              name: rowName || 'Player',
+              email: effectiveEmail,
+              phone: rowPhone || undefined,
+              gender: row.gender || undefined,
+              age: row.age ? Number(row.age) : undefined,
+              date_of_birth: isoDob || undefined,
+            });
+            localPlayers.push(matchedPlayer);
+          } catch (e) {
+            console.warn('Could not create profile upfront:', e);
+          }
+        }
+
         const playerId = matchedPlayer ? matchedPlayer.id : `u-shadow-${Date.now()}-${idx}`;
-        
+
         const reg: Registration = {
-          id: `reg-imported-${Date.now()}-${idx}`,
+          id: `reg-imported-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 7)}`,
           tournament_id: importTournamentId,
           event_id: importEventId,
           player_id: playerId,
-          player_name: row.name,
-          player_email: row.email,
+          player_name: matchedPlayer?.name || row.name,
+          player_email: matchedPlayer?.email || effectiveEmail,
           status: 'approved', // imported registrations are auto-approved
           registered_at: new Date().toISOString(),
           partner_name: row.partnername || undefined,
@@ -419,31 +528,48 @@ export default function RegistrationsPage() {
           partner_gender: row.partnergender || undefined,
           partner_age: row.partnerage ? Number(row.partnerage) : undefined,
         };
-        return reg;
-      });
+        newRegistrations.push(reg);
+      }
 
+      setPlayers(localPlayers);
       await saveRegistrationsBatch(newRegistrations);
-      setRegistrations(prev => [...prev, ...newRegistrations]);
-      alert(`Successfully imported ${newRegistrations.length} registrations!`);
+
+      // Refresh registrations in frontend
+      const refreshedRegs = await getRegistrations();
+      setRegistrations(refreshedRegs);
+
+      alert(`Successfully processed ${newRegistrations.length} registrations for ${selectedTournament?.name || 'tournament'}!`);
       
       // Reset state
       setImportedRows([]);
       setValidationErrors({});
       setShowImportDrawer(false);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to save imported registrations:', err);
-      alert('Failed to save imported registrations.');
+      alert(err.message || 'Failed to save imported registrations.');
     } finally {
       setIsSavingImport(false);
     }
   };
 
   const handleDownloadTemplate = () => {
-    const csvContent = "data:text/csv;charset=utf-8,Name,Email,Phone,Age,Gender,DOB,PartnerName,PartnerEmail,PartnerGender,PartnerAge\nJohn Doe,john@example.com,9876543210,12,Male,2014-05-15,,,\nJane Smith,jane@example.com,9876543211,28,Female,1998-09-20,,,\n";
+    const selectedTour = tournaments.find(t => t.id === importTournamentId);
+    const selectedEv = events.find(e => e.id === importEventId);
+    const tourName = selectedTour ? selectedTour.name.replace(/,/g, ' ') : 'Tournament';
+    const tourId = selectedTour ? selectedTour.id : 'tour_id';
+    const eventName = selectedEv ? selectedEv.event_name?.replace(/,/g, ' ') : 'Event';
+    const eventId = selectedEv ? selectedEv.id : 'event_id';
+
+    const headers = "TournamentName,TournamentID,EventName,EventID,Name,Email,Phone,Age,Gender,DOB,PartnerName,PartnerEmail,PartnerGender,PartnerAge";
+    const sampleRow1 = `"${tourName}","${tourId}","${eventName}","${eventId}","John Doe","john@example.com","9876543210","24","Male","2000-05-15","","","",""`;
+    const sampleRow2 = `"${tourName}","${tourId}","${eventName}","${eventId}","Jane Smith","jane@example.com","9876543211","22","Female","2002-09-20","","","",""`;
+
+    const csvContent = "data:text/csv;charset=utf-8," + [headers, sampleRow1, sampleRow2].join("\n") + "\n";
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "matchpoint_roster_template.csv");
+    const filenameSafe = selectedTour ? selectedTour.name.toLowerCase().replace(/[^a-z0-9]/g, '_') : 'matchpoint';
+    link.setAttribute("download", `${filenameSafe}_roster_template.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -823,42 +949,83 @@ export default function RegistrationsPage() {
             </div>
 
             {/* Selection Step */}
-            <div style={{ display: 'flex', gap: 16, marginBottom: 20, background: 'var(--bg-secondary)', padding: 16, borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
-              <div style={{ flex: 1 }}>
-                <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500 }}>Select Target Tournament</label>
-                <select
-                  className="input"
-                  value={importTournamentId}
-                  onChange={e => {
-                    setImportTournamentId(e.target.value);
-                    setImportedRows([]);
-                    setValidationErrors({});
-                  }}
-                >
-                  {filteredTournaments.map(t => (
-                    <option key={t.id} value={t.id}>{t.name} ({t.type})</option>
-                  ))}
-                </select>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20, background: 'var(--bg-secondary)', padding: 16, borderRadius: 'var(--radius-md)', border: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+                  1. Select Tournament & Event Category
+                </span>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  CSV template will automatically customize for your selected tournament
+                </span>
               </div>
-              <div style={{ flex: 1 }}>
-                <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 13, fontWeight: 500 }}>Select Target Event/Category</label>
-                <select
-                  className="input"
-                  value={importEventId}
-                  onChange={e => {
-                    setImportEventId(e.target.value);
-                    setImportedRows([]);
-                    setValidationErrors({});
-                  }}
-                  disabled={importEvents.length === 0}
+
+              <div style={{ display: 'flex', gap: 16 }}>
+                <div style={{ flex: 1 }}>
+                  <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 12, fontWeight: 600 }}>Select Target Tournament *</label>
+                  <select
+                    className="input"
+                    value={importTournamentId}
+                    onChange={e => {
+                      setImportTournamentId(e.target.value);
+                      setImportedRows([]);
+                      setValidationErrors({});
+                    }}
+                  >
+                    {filteredTournaments.length === 0 && <option value="">No tournaments available</option>}
+                    {filteredTournaments.map(t => (
+                      <option key={t.id} value={t.id}>{t.name} ({t.type === 'team' ? '👥 Team' : '👤 Individual'})</option>
+                    ))}
+                  </select>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label className="label" style={{ marginBottom: 6, display: 'block', fontSize: 12, fontWeight: 600 }}>Select Target Event / Match Format *</label>
+                  <select
+                    className="input"
+                    value={importEventId}
+                    onChange={e => {
+                      setImportEventId(e.target.value);
+                      setImportedRows([]);
+                      setValidationErrors({});
+                    }}
+                    disabled={importEvents.length === 0}
+                  >
+                    {importEvents.length === 0 && <option value="">No events configured</option>}
+                    {importEvents.map(ev => (
+                      <option key={ev.id} value={ev.id}>
+                        {ev.event_name} ({ev.category || 'Open'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Tournament Context and Template Download Bar */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                paddingTop: 10,
+                borderTop: '1px solid var(--border)',
+                flexWrap: 'wrap',
+                gap: 8,
+              }}>
+                <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                  Target: <strong>{tournaments.find(t => t.id === importTournamentId)?.name || 'None'}</strong>
+                  {importEventId && (
+                    <span style={{ marginLeft: 8, color: 'var(--accent)' }}>
+                      • {events.find(e => e.id === importEventId)?.event_name || 'Event'}
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={handleDownloadTemplate}
+                  disabled={!importTournamentId}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px', fontWeight: 600 }}
                 >
-                  {importEvents.length === 0 && <option value="">No events configured</option>}
-                  {importEvents.map(ev => (
-                    <option key={ev.id} value={ev.id}>
-                      {ev.event_name} (Category: {ev.category}, Limit: {ev.entry_limit})
-                    </option>
-                  ))}
-                </select>
+                  📥 Download Pre-Filled CSV Template
+                </button>
               </div>
             </div>
 

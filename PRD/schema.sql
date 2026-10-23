@@ -1,14 +1,26 @@
 -- ============================================================
--- MatchPoint — Supabase PostgreSQL Database Schema & Seed Data
+-- MatchPoint — Supabase PostgreSQL Consolidated Database Schema
 -- ============================================================
 -- Run this in your Supabase SQL Editor (Dashboard -> SQL Editor -> New Query)
 -- ============================================================
 
 -- Clean up existing tables if they exist
+DROP TABLE IF EXISTS payment_transactions CASCADE;
+DROP TABLE IF EXISTS payment_orders CASCADE;
+DROP TABLE IF EXISTS match_history CASCADE;
+DROP TABLE IF EXISTS match_comments CASCADE;
+DROP TABLE IF EXISTS tournament_media CASCADE;
+DROP TABLE IF EXISTS tournament_feedback CASCADE;
+DROP TABLE IF EXISTS tournament_certificates CASCADE;
+DROP TABLE IF EXISTS support_requests CASCADE;
+DROP TABLE IF EXISTS activity_logs CASCADE;
+DROP TABLE IF EXISTS user_logins CASCADE;
+DROP TABLE IF EXISTS audit_logs CASCADE;
 DROP TABLE IF EXISTS matches CASCADE;
 DROP TABLE IF EXISTS teams CASCADE;
 DROP TABLE IF EXISTS registrations CASCADE;
 DROP TABLE IF EXISTS tournament_events CASCADE;
+DROP TABLE IF EXISTS events_master CASCADE;
 DROP TABLE IF EXISTS tournaments CASCADE;
 DROP TABLE IF EXISTS profiles CASCADE;
 
@@ -21,6 +33,9 @@ CREATE TABLE profiles (
   roles TEXT[] NOT NULL DEFAULT '{player}'::TEXT[],
   avatar TEXT,
   password_hash VARCHAR(255),
+  age INTEGER,
+  gender VARCHAR(10),
+  date_of_birth DATE,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -42,19 +57,35 @@ CREATE TABLE tournaments (
   team_tie_configs JSONB DEFAULT '[]'::JSONB,
   bonus_point_margin INTEGER DEFAULT 5,
   bonus_point_value INTEGER DEFAULT 1,
+  age_cutoff_date DATE,
+  withdraw_date DATE,
+  admins TEXT[] DEFAULT '{}'::TEXT[],
+  payment_options JSONB DEFAULT '[]'::JSONB,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 3. Tournament Events Table
+-- 2.5 Event Master Table (Predefined standardized event formats and brackets)
+CREATE TABLE events_master (
+  id TEXT PRIMARY KEY, -- e.g., 'bs_u13', 'ms_open', 'xd_v40'
+  name TEXT NOT NULL,
+  event_type VARCHAR(20) NOT NULL CHECK (event_type IN ('singles', 'doubles', 'team')),
+  category VARCHAR(20) NOT NULL CHECK (category IN ('junior', 'open', 'veteran')),
+  gender VARCHAR(20) NOT NULL CHECK (gender IN ('Male', 'Female', 'Mixed', 'Open')),
+  min_age INTEGER,
+  max_age INTEGER,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. Tournament Events Table (Links tournaments to standardized master events)
 CREATE TABLE tournament_events (
   id TEXT PRIMARY KEY,
   tournament_id TEXT REFERENCES tournaments(id) ON DELETE CASCADE,
-  event_name TEXT NOT NULL,
-  category TEXT NOT NULL,
+  master_event_id TEXT REFERENCES events_master(id) ON DELETE RESTRICT,
   entry_limit INTEGER NOT NULL DEFAULT 32,
   format TEXT NOT NULL CHECK (format IN ('knockout', 'round_robin', 'swiss', 'league', 'hybrid')),
-  scoring_format TEXT NOT NULL DEFAULT '21-point' CHECK (scoring_format IN ('11-point', '15-point', '21-point')),
+  scoring_format TEXT NOT NULL DEFAULT '21-point',
   registrations_count INTEGER DEFAULT 0,
+  entry_fee DECIMAL(10, 2),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -70,6 +101,10 @@ CREATE TABLE registrations (
   disqualification_reason TEXT,
   registered_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   seed INTEGER,
+  partner_name VARCHAR(100),
+  partner_email VARCHAR(100),
+  partner_gender VARCHAR(10),
+  partner_age INTEGER,
   UNIQUE(event_id, player_id)
 );
 
@@ -89,11 +124,12 @@ CREATE TABLE matches (
   tournament_id TEXT REFERENCES tournaments(id) ON DELETE CASCADE,
   event_id TEXT REFERENCES tournament_events(id) ON DELETE CASCADE,
   fixture_round INTEGER NOT NULL DEFAULT 1,
+  round_name VARCHAR(255),
   fixture_position INTEGER NOT NULL DEFAULT 0,
   court TEXT,
-  player1_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+  player1_id TEXT,
   player1_name TEXT NOT NULL,
-  player2_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+  player2_id TEXT,
   player2_name TEXT NOT NULL,
   umpire_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
   umpire_name TEXT,
@@ -125,7 +161,7 @@ CREATE TABLE user_logins (
   login_time TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   ip_address VARCHAR(45),
   user_agent TEXT,
-  status VARCHAR(20) NOT NULL -- 'success', 'failed_bad_credentials'
+  status VARCHAR(50) NOT NULL -- 'success', 'failed_bad_credentials'
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_logins_time ON user_logins(login_time);
@@ -142,90 +178,142 @@ CREATE TABLE activity_logs (
 
 CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON activity_logs(created_at);
 
+-- 10. Match History Table (detailed point-by-point match data)
+CREATE TABLE match_history (
+  id TEXT PRIMARY KEY,
+  match_id TEXT NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+  tournament_id TEXT REFERENCES tournaments(id) ON DELETE CASCADE,
+  event_id TEXT REFERENCES tournament_events(id) ON DELETE CASCADE,
+  umpire_id TEXT,
+  umpire_name TEXT,
+  player1_name TEXT,
+  player2_name TEXT,
+  scoring_format TEXT,
+  best_of_games INTEGER DEFAULT 3,
+  court TEXT,
+  points_history JSONB DEFAULT '[]'::JSONB,
+  sets_snapshot JSONB DEFAULT '[]'::JSONB,
+  total_duration_seconds INTEGER,
+  play_time_seconds INTEGER,
+  paused_time_seconds INTEGER,
+  started_at TIMESTAMP WITH TIME ZONE,
+  ended_at TIMESTAMP WITH TIME ZONE,
+  winner_id TEXT,
+  winner_name TEXT,
+  final_status TEXT DEFAULT 'completed',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 
--- ============================================================
--- Seeding Initial Demo Data
--- ============================================================
+CREATE INDEX IF NOT EXISTS idx_match_history_match ON match_history(match_id);
+CREATE INDEX IF NOT EXISTS idx_match_history_tournament ON match_history(tournament_id);
 
--- Seed 1. Profiles
-INSERT INTO profiles (id, email, name, phone, roles, password_hash, created_at) VALUES
-('u1', 'admin@matchpoint.io', 'Rajesh Kumar', '+91 98765 43210', '{admin,player}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '130 days'),
-('u2', 'priya@matchpoint.io', 'Priya Sharma', '+91 91234 56789', '{player}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '115 days'),
-('u3', 'vikas@matchpoint.io', 'Vikas Patel', NULL, '{player}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '111 days'),
-('u4', 'anita@matchpoint.io', 'Anita Desai', NULL, '{player}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '106 days'),
-('u5', 'umpire@matchpoint.io', 'Suresh Nair', NULL, '{umpire,player}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '125 days'),
-('u6', 'rahul@matchpoint.io', 'Rahul Singh', NULL, '{player}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '86 days'),
-('u7', 'neha@matchpoint.io', 'Neha Gupta', NULL, '{player}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '82 days'),
-('u8', 'amit@matchpoint.io', 'Amit Verma', NULL, '{player}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '77 days'),
-('u9', 'deepa@matchpoint.io', 'Deepa Menon', NULL, '{player}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '75 days'),
-('u10', 'karthik@matchpoint.io', 'Karthik Rajan', NULL, '{player}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '72 days'),
-('u11', 'allroles@matchpoint.io', 'Arjun Mehta', NULL, '{admin,player,umpire}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '135 days'),
-('u12', 'umpire2@matchpoint.io', 'Kavita Rao', NULL, '{umpire}'::TEXT[], '$2a$10$x8t6/YJ91Z/t9rJ6yQ3Xz.H1F.3v5qE0rFw6wL5xW82bE0w1n8d6C', CURRENT_TIMESTAMP - INTERVAL '95 days');
+-- 11. Tournament Media Table (compressed Base64 files or remote image URLs)
+CREATE TABLE tournament_media (
+  id TEXT PRIMARY KEY,
+  tournament_id TEXT NOT NULL REFERENCES tournaments(id) ON DELETE CASCADE,
+  uploaded_by TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+  file_url TEXT NOT NULL,
+  caption TEXT,
+  media_type VARCHAR(20) NOT NULL DEFAULT 'image',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 
--- Seed 2. Tournaments
-INSERT INTO tournaments (id, name, slug, description, location, start_date, end_date, type, status, created_by, created_at) VALUES
-('t1', 'Mumbai Badminton Open 2025', 'mumbai-open-2025', 'The premier badminton tournament in Mumbai. Open to all skill levels. Prizes worth ₹5,00,000!', 'Shree Shiv Chhatrapati Sports Complex, Mumbai', '2025-06-15', '2025-06-22', 'individual', 'live', 'u1', CURRENT_TIMESTAMP - INTERVAL '120 days'),
-('t2', 'Delhi Shuttle Championship', 'delhi-shuttle-championship', 'Annual championship featuring top players from across North India.', 'Siri Fort Sports Complex, New Delhi', '2025-07-10', '2025-07-14', 'individual', 'open', 'u1', CURRENT_TIMESTAMP - INTERVAL '100 days'),
-('t3', 'Bangalore Corporate League', 'bangalore-corporate-league', 'Team-based corporate badminton league. Companies compete head-to-head!', 'Koramangala Indoor Stadium, Bangalore', '2025-08-01', '2025-08-15', 'team', 'draft', 'u1', CURRENT_TIMESTAMP - INTERVAL '80 days'),
-('t4', 'Pune Masters Invitational', 'pune-masters-2025', 'Invitational tournament for ranked players. Seeded draw with knockout format.', 'Balewadi Stadium, Pune', '2025-05-01', '2025-05-05', 'individual', 'completed', 'u1', CURRENT_TIMESTAMP - INTERVAL '135 days');
+CREATE INDEX IF NOT EXISTS idx_tournament_media_tour ON tournament_media(tournament_id);
 
--- Seed 3. Tournament Events
-INSERT INTO tournament_events (id, tournament_id, event_name, category, entry_limit, format, scoring_format, registrations_count) VALUES
-('e1', 't1', 'Men''s Singles', 'MS', 32, 'knockout', '21-point', 24),
-('e2', 't1', 'Women''s Singles', 'WS', 16, 'knockout', '21-point', 12),
-('e3', 't1', 'Men''s Doubles', 'MD', 16, 'knockout', '21-point', 14),
-('e4', 't1', 'Mixed Doubles', 'XD', 16, 'knockout', '21-point', 10),
-('e5', 't2', 'Men''s Singles', 'MS', 64, 'knockout', '21-point', 38),
-('e6', 't2', 'Women''s Singles', 'WS', 32, 'knockout', '21-point', 20),
-('e7', 't4', 'Men''s Singles', 'MS', 16, 'knockout', '21-point', 16),
-('e8', 't3', 'Team Event', 'TEAM', 8, 'league', '21-point', 6);
+-- 12. Match Comments Table (spectator real-time match comments)
+CREATE TABLE match_comments (
+  id TEXT PRIMARY KEY,
+  match_id TEXT NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+  user_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+  user_name TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 
--- Seed 4. Registrations
-INSERT INTO registrations (id, tournament_id, event_id, player_id, player_name, player_email, status, registered_at, seed) VALUES
-('r1', 't1', 'e1', 'u2', 'Priya Sharma', 'priya@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '56 days', 1),
-('r2', 't1', 'e1', 'u3', 'Vikas Patel', 'vikas@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '55 days', 2),
-('r3', 't1', 'e1', 'u4', 'Anita Desai', 'anita@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '54 days', 3),
-('r4', 't1', 'e1', 'u6', 'Rahul Singh', 'rahul@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '53 days', 4),
-('r5', 't1', 'e1', 'u7', 'Neha Gupta', 'neha@matchpoint.io', 'pending', CURRENT_TIMESTAMP - INTERVAL '52 days', NULL),
-('r6', 't1', 'e1', 'u8', 'Amit Verma', 'amit@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '51 days', 5),
-('r7', 't1', 'e1', 'u9', 'Deepa Menon', 'deepa@matchpoint.io', 'rejected', CURRENT_TIMESTAMP - INTERVAL '50 days', NULL),
-('r8', 't1', 'e1', 'u10', 'Karthik Rajan', 'karthik@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '49 days', 6),
-('r11', 't1', 'e2', 'u2', 'Priya Sharma', 'priya@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '56 days', 1),
-('r12', 't1', 'e2', 'u4', 'Anita Desai', 'anita@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '55 days', 2),
-('r13', 't1', 'e2', 'u7', 'Neha Gupta', 'neha@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '54 days', 3),
-('r14', 't1', 'e2', 'u9', 'Deepa Menon', 'deepa@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '53 days', 4),
-('r9', 't2', 'e5', 'u2', 'Priya Sharma', 'priya@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '26 days', 1),
-('r10', 't2', 'e5', 'u6', 'Rahul Singh', 'rahul@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '25 days', 2),
-('r15', 't2', 'e5', 'u3', 'Vikas Patel', 'vikas@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '24 days', 3),
-('r16', 't2', 'e5', 'u8', 'Amit Verma', 'amit@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '23 days', 4),
-('r17', 't2', 'e6', 'u4', 'Anita Desai', 'anita@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '26 days', 1),
-('r18', 't2', 'e6', 'u7', 'Neha Gupta', 'neha@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '25 days', 2),
-('r19', 't2', 'e6', 'u9', 'Deepa Menon', 'deepa@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '24 days', 3),
-('r20', 't2', 'e6', 'u2', 'Priya Sharma', 'priya@matchpoint.io', 'approved', CURRENT_TIMESTAMP - INTERVAL '23 days', 4);
+CREATE INDEX IF NOT EXISTS idx_match_comments_match ON match_comments(match_id);
 
--- Seed 5. Teams
-INSERT INTO teams (id, name, tournament_id, logo_color, captain_id, players) VALUES
-('team1', 'Infosys Smashers', 't3', '#6366f1', 'u3', '{"u3","u6"}'::TEXT[]),
-('team2', 'TCS Titans', 't3', '#ef4444', 'u8', '{"u8","u10"}'::TEXT[]),
-('team3', 'Wipro Warriors', 't3', '#22c55e', NULL, '{}'::TEXT[]);
+-- 13. Tournament Certificates Table
+CREATE TABLE tournament_certificates (
+  id TEXT PRIMARY KEY,
+  tournament_id TEXT UNIQUE REFERENCES tournaments(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  template_type TEXT DEFAULT 'classic',
+  signature_data TEXT, -- Base64 encoded signature
+  border_color TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 
--- Seed 6. Matches
-INSERT INTO matches (id, tournament_id, event_id, fixture_round, fixture_position, court, player1_id, player1_name, player2_id, player2_name, umpire_id, umpire_name, scheduled_time, actual_start_time, actual_end_time, duration_seconds, status, winner_id, sets) VALUES
-('m1', 't1', 'e1', 2, 0, 'Court 1', 'u2', 'Priya Sharma', 'u3', 'Vikas Patel', 'u5', 'Suresh Nair', '2025-06-20T10:00:00Z', NULL, NULL, NULL, 'running', NULL, 
- '[{"set_number": 1, "player1_score": 21, "player2_score": 18, "is_complete": true, "winner_id": "u2"},
-   {"set_number": 2, "player1_score": 14, "player2_score": 17, "is_complete": false}]'::JSONB),
-('m2', 't1', 'e1', 2, 1, 'Court 2', 'u4', 'Anita Desai', 'u6', 'Rahul Singh', NULL, NULL, '2025-06-20T14:00:00Z', NULL, NULL, NULL, 'scheduled', NULL, '[]'::JSONB),
-('m3', 't1', 'e1', 1, 0, 'Court 1', 'u2', 'Priya Sharma', 'u8', 'Amit Verma', NULL, NULL, '2025-06-18T10:00:00Z', NULL, NULL, NULL, 'completed', 'u2', 
- '[{"set_number": 1, "player1_score": 21, "player2_score": 15, "is_complete": true, "winner_id": "u2"},
-   {"set_number": 2, "player1_score": 21, "player2_score": 12, "is_complete": true, "winner_id": "u2"}]'::JSONB),
-('m4', 't1', 'e1', 1, 1, 'Court 2', 'u3', 'Vikas Patel', 'u10', 'Karthik Rajan', NULL, NULL, '2025-06-18T14:00:00Z', NULL, NULL, NULL, 'completed', 'u3', 
- '[{"set_number": 1, "player1_score": 18, "player2_score": 21, "is_complete": true, "winner_id": "u10"},
-   {"set_number": 2, "player1_score": 21, "player2_score": 16, "is_complete": true, "winner_id": "u3"},
-   {"set_number": 3, "player1_score": 21, "player2_score": 19, "is_complete": true, "winner_id": "u3"}]'::JSONB),
-('m5', 't1', 'e1', 1, 2, 'Court 1', 'u4', 'Anita Desai', 'u7', 'Neha Gupta', NULL, NULL, '2025-06-19T10:00:00Z', NULL, NULL, NULL, 'completed', 'u4', 
- '[{"set_number": 1, "player1_score": 21, "player2_score": 11, "is_complete": true, "winner_id": "u4"},
-   {"set_number": 2, "player1_score": 21, "player2_score": 17, "is_complete": true, "winner_id": "u4"}]'::JSONB),
-('m6', 't1', 'e1', 1, 3, 'Court 2', 'u6', 'Rahul Singh', 'u9', 'Deepa Menon', NULL, NULL, '2025-06-19T14:00:00Z', NULL, NULL, NULL, 'completed', 'u6', 
- '[{"set_number": 1, "player1_score": 21, "player2_score": 19, "is_complete": true, "winner_id": "u6"},
-   {"set_number": 2, "player1_score": 19, "player2_score": 21, "is_complete": true, "winner_id": "u9"},
-   {"set_number": 3, "player1_score": 21, "player2_score": 15, "is_complete": true, "winner_id": "u6"}]'::JSONB);
+-- 14. Support Requests Table
+CREATE TABLE support_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  organization TEXT,
+  message TEXT NOT NULL,
+  status TEXT DEFAULT 'open',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 15. Tournament Feedback Table
+CREATE TABLE tournament_feedback (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tournament_id TEXT REFERENCES tournaments(id) ON DELETE CASCADE,
+  user_id TEXT,
+  user_name TEXT DEFAULT 'Anonymous',
+  feedback_type TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Consolidated performance & concurrency-optimized database indexes
+CREATE INDEX IF NOT EXISTS idx_matches_tour_id ON matches(tournament_id);
+CREATE INDEX IF NOT EXISTS idx_matches_event_id ON matches(event_id);
+CREATE INDEX IF NOT EXISTS idx_matches_p1_id ON matches(player1_id);
+CREATE INDEX IF NOT EXISTS idx_matches_p2_id ON matches(player2_id);
+CREATE INDEX IF NOT EXISTS idx_registrations_tour_id ON registrations(tournament_id);
+CREATE INDEX IF NOT EXISTS idx_registrations_event_id ON registrations(event_id);
+CREATE INDEX IF NOT EXISTS idx_registrations_player_id ON registrations(player_id);
+CREATE INDEX IF NOT EXISTS idx_teams_tour_id ON teams(tournament_id);
+CREATE INDEX IF NOT EXISTS idx_tournament_events_tour_id ON tournament_events(tournament_id);
+CREATE INDEX IF NOT EXISTS idx_user_logins_user_id ON user_logins(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_tournament_media_uploaded_by ON tournament_media(uploaded_by);
+CREATE INDEX IF NOT EXISTS idx_match_comments_user_id ON match_comments(user_id);
+
+-- 16. Payment Orders Table
+CREATE TABLE payment_orders (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id TEXT REFERENCES profiles(id) ON DELETE SET NULL,
+  registration_id TEXT REFERENCES registrations(id) ON DELETE CASCADE,
+  amount DECIMAL(10, 2) NOT NULL,
+  currency VARCHAR(10) NOT NULL DEFAULT 'INR',
+  razorpay_order_id VARCHAR(100) UNIQUE NOT NULL,
+  status VARCHAR(50) NOT NULL DEFAULT 'created',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 17. Payment Transactions Table
+CREATE TABLE payment_transactions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id UUID REFERENCES payment_orders(id) ON DELETE CASCADE,
+  razorpay_payment_id VARCHAR(100) UNIQUE NOT NULL,
+  payment_method VARCHAR(50),
+  status VARCHAR(50) NOT NULL,
+  paid_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Indexes for payments
+CREATE INDEX IF NOT EXISTS idx_payment_orders_user_id ON payment_orders(user_id);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_registration_id ON payment_orders(registration_id);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_razorpay_order_id ON payment_orders(razorpay_order_id);
+CREATE INDEX IF NOT EXISTS idx_payment_transactions_order_id ON payment_transactions(order_id);
+
+-- Additional missing foreign key & performance indexes
+CREATE INDEX IF NOT EXISTS idx_tournaments_created_by ON tournaments(created_by);
+CREATE INDEX IF NOT EXISTS idx_tournament_events_master_event ON tournament_events(master_event_id);
+CREATE INDEX IF NOT EXISTS idx_teams_captain_id ON teams(captain_id);
+CREATE INDEX IF NOT EXISTS idx_matches_umpire_id ON matches(umpire_id);
+CREATE INDEX IF NOT EXISTS idx_tournament_feedback_tournament ON tournament_feedback(tournament_id);
+CREATE INDEX IF NOT EXISTS idx_match_history_event ON match_history(event_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+

@@ -1,20 +1,38 @@
 server:
   port: 8080
+  compression:
+    enabled: true
+    mime-types: application/json,text/html,text/xml,text/plain,application/javascript,text/css
+    min-response-size: 1024
   error:
     include-message: always
+  tomcat:
+    threads:
+      max: 150
+      min-spare: 10
+    max-connections: 2000
+    accept-count: 100
 
 spring:
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://pcfwdibqnpvikdntgypw.supabase.co:5432/postgres?sslmode=require}
-    username: ${SPRING_DATASOURCE_USERNAME:postgres}
-    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+    # Aiven PostgreSQL Database
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://tournamentarena-tournamentarena.g.aivencloud.com:18512/defaultdb?sslmode=require}
+    username: ${SPRING_DATASOURCE_USERNAME:avnadmin}
+    password: ${SPRING_DATASOURCE_PASSWORD:AVNS_l5YyCQa0-FPogLw0jLo}
+    # Previous Supabase config:
+    # url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://pcfwdibqnpvikdntgypw.supabase.co:5432/postgres?sslmode=require}
+    # username: ${SPRING_DATASOURCE_USERNAME:postgres}
+    # password: ${SPRING_DATASOURCE_PASSWORD:postgres}
     driver-class-name: org.postgresql.Driver
     hikari:
-      maximum-pool-size: 8
+      maximum-pool-size: 20
       minimum-idle: 2
-      idle-timeout: 30000
+      idle-timeout: 10000
       connection-timeout: 20000
-      max-lifetime: 1800000
+      max-lifetime: 300000
+
+  jackson:
+    property-naming-strategy: SNAKE_CASE
 
   jpa:
     database-platform: org.hibernate.dialect.PostgreSQLDialect
@@ -32,9 +50,16 @@ matchpoint:
     secret: ${JWT_SECRET:dGhpcy1pcy1hLXNlY3VyZS1zaWduaW5nLWtleS1mb3ItbWF0Y2hwb2ludC1iYWRtaW50b24tbGVhZ3VlLXN5c3RlbS1iYWNrZW5kLXByb2plY3Q=}
     expiration-ms: 86400000 # 24 Hours validity
 
+razorpay:
+  key-id: ${RAZORPAY_KEY_ID:rzp_test_mockKeyId}
+  key-secret: ${RAZORPAY_KEY_SECRET:mockKeySecret}
+  webhook-secret: ${RAZORPAY_WEBHOOK_SECRET:mockWebhookSecret}
+
 logging:
   level:
     root: INFO
     io.matchpoint: DEBUG
     org.springframework.security: DEBUG
     org.springframework.web: DEBUG
+  file:
+    name: logs/matchpoint-backend.log

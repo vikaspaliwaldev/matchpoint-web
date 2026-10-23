@@ -17,6 +17,8 @@ export interface User {
   age?: number;
   gender?: string;
   date_of_birth?: string;
+  batting_style?: 'RHB' | 'LHB';
+  bowling_style?: string;
   created_at: string;
 }
 
@@ -65,6 +67,20 @@ export interface Tournament {
   platform_fee_percentage?: number;
   payment_options?: PaymentOption[];
   sport?: string;
+  cricket_config?: {
+    overs_per_innings: number;
+    powerplay_overs?: number;
+    max_overs_per_bowler?: number;
+    free_hit_on_no_ball?: boolean;
+    wide_runs?: number;
+    no_ball_runs?: number;
+    one_tip_one_hand?: boolean;
+    roof_is_dead_ball?: boolean;
+    box_wall_runs?: number;
+    retire_at_runs?: number;
+    ball_type?: 'leather' | 'tennis' | 'tape' | 'rubber';
+    pitch_type?: 'turf' | 'matting' | 'concrete' | 'ground';
+  };
 }
 
 export interface PaymentOption {
@@ -137,6 +153,20 @@ export interface Registration {
 
 // ---- Team ----
 
+export type CricketPlayerRole = 'batsman' | 'bowler' | 'all_rounder' | 'wicket_keeper';
+
+export interface TeamRosterPlayer {
+  id: string;
+  name: string;
+  jersey_number?: number;
+  role?: CricketPlayerRole;
+  batting_style?: 'RHB' | 'LHB';
+  bowling_style?: string;
+  is_captain?: boolean;
+  is_vice_captain?: boolean;
+  is_wicket_keeper?: boolean;
+}
+
 export interface Team {
   id: string;
   name: string;
@@ -145,6 +175,8 @@ export interface Team {
   logo_url?: string;
   captain_id?: string;
   players: string[]; // player user IDs
+  roster?: TeamRosterPlayer[];
+  short_name?: string; // e.g. "MI", "CSK", "RCB"
 }
 
 // ---- Match ----

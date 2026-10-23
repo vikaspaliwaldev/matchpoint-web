@@ -74,8 +74,8 @@ export default function VolleyballScoring({
   // Infer default rules from event scoring_format if not previously saved in sport_metadata
   const eventScoring = event?.scoring_format || '';
   const initialFormatFromEvent = 
-    eventScoring.includes('best-of-5') ? 'best_of_5' :
-    eventScoring.includes('best-of-3') ? 'best_of_3' : 'best_of_3';
+    (eventScoring.includes('best-of-5') || eventScoring.includes('best_of_5')) ? 'best_of_5' :
+    (eventScoring.includes('best-of-3') || eventScoring.includes('best_of_3')) ? 'best_of_3' : 'best_of_3';
 
   const initialStandardPointsFromEvent =
     eventScoring.startsWith('15-point') ? 15 :
@@ -89,8 +89,13 @@ export default function VolleyballScoring({
   );
   const [decidingSetPoints, setDecidingSetPoints] = useState<number>(existingMeta.deciding_set_points || 15);
   const [servingTeam, setServingTeam] = useState<'player1' | 'player2'>(existingMeta.serving_team || 'player1');
+  const [maxTimeouts, setMaxTimeouts] = useState<number>(existingMeta.max_timeouts ?? existingMeta.max_timeouts_per_set ?? 2);
+  const [timeoutScope, setTimeoutScope] = useState<'set' | 'match'>(existingMeta.timeout_scope ?? 'set');
   const [timeoutsP1, setTimeoutsP1] = useState<number>(existingMeta.timeouts_p1 || 0);
   const [timeoutsP2, setTimeoutsP2] = useState<number>(existingMeta.timeouts_p2 || 0);
+  const [activeTimeoutTeam, setActiveTimeoutTeam] = useState<'player1' | 'player2' | null>(null);
+  const [timeoutCountdown, setTimeoutCountdown] = useState<number>(0);
+  const timeoutCountdownRef = useRef<NodeJS.Timeout | null>(null);
 
   // Point classification stats
   const [statsP1, setStatsP1] = useState<VolleyballPointStats>(
@@ -168,6 +173,7 @@ export default function VolleyballScoring({
   const [customEarlyConcludeReason, setCustomEarlyConcludeReason] = useState<string>('');
   const [showMediaModal, setShowMediaModal] = useState(false);
   const [showStatsModal, setShowStatsModal] = useState(false);
+  const [showAttributionSheet, setShowAttributionSheet] = useState(false);
   const [mobileAttributionTab, setMobileAttributionTab] = useState<'player1' | 'player2'>('player1');
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -176,6 +182,31 @@ export default function VolleyballScoring({
   // Sets state: Always guarantee all sets for the format exist
   const initializeSets = (): MatchSet[] => {
     const maxSets = matchFormat === 'best_of_5' ? 5 : 3;
+
+    // If local offline backup exists, prefer its sets if available
+    if (typeof window !== 'undefined') {
+      try {
+        const stored = localStorage.getItem(`matchpoint_offline_score_${match.id}`);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed.sets) && parsed.sets.length > 0) {
+            const storedSets: MatchSet[] = [...parsed.sets];
+            // Ensure up to maxSets sets exist
+            for (let i = storedSets.length + 1; i <= maxSets; i++) {
+              storedSets.push({
+                set_number: i,
+                player1_score: 0,
+                player2_score: 0,
+                is_complete: false,
+                winner_id: undefined,
+              });
+            }
+            return storedSets;
+          }
+        }
+      } catch {}
+    }
+
     const initial: MatchSet[] = [];
     const existingSets = match.sets || [];
     
@@ -203,6 +234,113 @@ export default function VolleyballScoring({
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [offlinePendingCount, setOfflinePendingCount] = useState<number>(0);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'saved_locally'>('idle');
+
+  // Flush offline queue for all stored matches when network is restored
+  const flushOfflineQueue = async () => {
+    if (typeof window === 'undefined') return;
+    try {
+      setSyncStatus('syncing');
+
+      // Scan all localStorage items for offline match scores
+      const keysToFlush: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('matchpoint_offline_score_')) {
+          keysToFlush.push(k);
+        }
+      }
+
+      if (keysToFlush.length === 0) {
+        setOfflinePendingCount(0);
+        setSyncStatus('idle');
+        return;
+      }
+
+      let flushedAny = false;
+      for (const k of keysToFlush) {
+        try {
+          const payloadStr = localStorage.getItem(k);
+          if (!payloadStr) continue;
+          const payload = JSON.parse(payloadStr);
+
+          await updateMatchScore(
+            payload.matchId,
+            payload.sets,
+            payload.status,
+            payload.winnerId,
+            payload.actualStartTime,
+            payload.actualEndTime,
+            payload.court,
+            undefined,
+            payload.durationSeconds,
+            'volleyball',
+            payload.metadata
+          );
+
+          localStorage.removeItem(k);
+          flushedAny = true;
+        } catch (itemErr) {
+          console.warn(`Failed to sync offline item ${k}:`, itemErr);
+        }
+      }
+
+      const remainingOffline = localStorage.getItem(`matchpoint_offline_score_${match.id}`);
+      if (remainingOffline) {
+        setOfflinePendingCount(1);
+        setSyncStatus('saved_locally');
+      } else {
+        setOfflinePendingCount(0);
+        setSyncStatus('idle');
+      }
+
+      if (flushedAny) {
+        onScoreUpdated();
+      }
+    } catch (err) {
+      console.warn('Failed to flush offline queue:', err);
+      setSyncStatus('saved_locally');
+    }
+  };
+
+  // Hydrate match state from offline storage on mount or match change
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const stored = localStorage.getItem(`matchpoint_offline_score_${match.id}`);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed.sets) && parsed.sets.length > 0) {
+          setSets(parsed.sets);
+        }
+        if (parsed.status === 'paused') {
+          setIsPaused(true);
+        } else if (parsed.status === 'running') {
+          setIsPaused(false);
+          setMatchStarted(true);
+        }
+        if (parsed.durationSeconds !== undefined && parsed.durationSeconds > 0) {
+          setMatchElapsed(parsed.durationSeconds);
+        }
+        if (parsed.metadata) {
+          const m = parsed.metadata as VolleyballMetadata;
+          if (m.match_format) setMatchFormat(m.match_format);
+          if (m.standard_set_points) setStandardSetPoints(m.standard_set_points);
+          if (m.deciding_set_points) setDecidingSetPoints(m.deciding_set_points);
+          if (m.serving_team) setServingTeam(m.serving_team);
+          if (m.timeouts_p1 !== undefined) setTimeoutsP1(m.timeouts_p1);
+          if (m.timeouts_p2 !== undefined) setTimeoutsP2(m.timeouts_p2);
+          if (m.stats_p1) setStatsP1(m.stats_p1);
+          if (m.stats_p2) setStatsP2(m.stats_p2);
+          if (m.rotation_p1) setRotationP1(m.rotation_p1);
+          if (m.rotation_p2) setRotationP2(m.rotation_p2);
+          if (m.last_point_type !== undefined) setLastPointType(m.last_point_type);
+          if (m.last_point_scorer !== undefined) setLastPointScorer(m.last_point_scorer);
+        }
+        setOfflinePendingCount(1);
+        setSyncStatus('saved_locally');
+      }
+    } catch {}
+  }, [match.id]);
 
   // Monitor network online/offline events
   useEffect(() => {
@@ -236,41 +374,26 @@ export default function VolleyballScoring({
     };
   }, [match.id]);
 
-  // Flush offline queue when network is restored
-  const flushOfflineQueue = async () => {
-    try {
-      const key = `matchpoint_offline_score_${match.id}`;
-      const payloadStr = localStorage.getItem(key);
-      if (!payloadStr) return;
-
-      setSyncStatus('syncing');
-      const payload = JSON.parse(payloadStr);
-
-      await updateMatchScore(
-        payload.matchId,
-        payload.sets,
-        payload.status,
-        payload.winnerId,
-        payload.actualStartTime,
-        payload.actualEndTime,
-        payload.court,
-        undefined,
-        payload.durationSeconds,
-        'volleyball',
-        payload.metadata
-      );
-
-      localStorage.removeItem(key);
-      setOfflinePendingCount(0);
-      setSyncStatus('idle');
-      onScoreUpdated();
-    } catch (err) {
-      console.warn('Failed to flush offline queue:', err);
-      setSyncStatus('saved_locally');
-    }
-  };
-
   const [sets, setSets] = useState<MatchSet[]>(initializeSets);
+
+  // Automatically keep sets array synchronized if matchFormat changes (e.g. Best of 5 requires 5 sets)
+  useEffect(() => {
+    const targetCount = matchFormat === 'best_of_5' ? 5 : 3;
+    setSets(prev => {
+      if (prev.length >= targetCount) return prev;
+      const updated = [...prev];
+      for (let i = prev.length + 1; i <= targetCount; i++) {
+        updated.push({
+          set_number: i,
+          player1_score: 0,
+          player2_score: 0,
+          is_complete: false,
+          winner_id: undefined,
+        });
+      }
+      return updated;
+    });
+  }, [matchFormat]);
 
   // Calculate sets won
   const setsToWin = matchFormat === 'best_of_5' ? 3 : 2;
@@ -324,6 +447,43 @@ export default function VolleyballScoring({
     };
   }, [matchStarted, isPaused, isMatchComplete]);
 
+  // Break / Pause Stopwatch Timer
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null;
+    if (isPaused && !isMatchComplete) {
+      interval = setInterval(() => {
+        setPauseElapsed(prev => prev + 1);
+      }, 1000);
+    } else {
+      setPauseElapsed(0);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [isPaused, isMatchComplete]);
+
+  // Dedicated 30s Timeout Countdown effect
+  useEffect(() => {
+    if (activeTimeoutTeam && timeoutCountdown > 0) {
+      timeoutCountdownRef.current = setInterval(() => {
+        setTimeoutCountdown(prev => {
+          if (prev <= 1) {
+            clearInterval(timeoutCountdownRef.current!);
+            setActiveTimeoutTeam(null);
+            playBeep(440, 0.4); // End of timeout buzz
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      if (timeoutCountdownRef.current) clearInterval(timeoutCountdownRef.current);
+    }
+    return () => {
+      if (timeoutCountdownRef.current) clearInterval(timeoutCountdownRef.current);
+    };
+  }, [activeTimeoutTeam, timeoutCountdown]);
+
   // Sync matchElapsed if match updates externally
   useEffect(() => {
     if (match.duration_seconds !== undefined && match.duration_seconds > matchElapsed) {
@@ -373,7 +533,9 @@ export default function VolleyballScoring({
       deciding_set_points: decidingSetPoints,
       timeouts_p1: newTimeoutsP1 !== undefined ? newTimeoutsP1 : timeoutsP1,
       timeouts_p2: newTimeoutsP2 !== undefined ? newTimeoutsP2 : timeoutsP2,
-      max_timeouts_per_set: 2,
+      max_timeouts_per_set: maxTimeouts,
+      max_timeouts: maxTimeouts,
+      timeout_scope: timeoutScope,
       stats_p1: overrideStatsP1 || statsP1,
       stats_p2: overrideStatsP2 || statsP2,
       rotation_p1: overrideRotationP1 || rotationP1,
@@ -549,10 +711,10 @@ export default function VolleyballScoring({
     const matchWonCheck = isVolleyballMatchWon(updatedSets, matchFormat);
     const isMatchNowWon = matchWonCheck.isWon;
 
-    // Reset timeouts on set completion
+    // Reset timeouts on set completion if scope is 'set'
     let nextT1 = timeoutsP1;
     let nextT2 = timeoutsP2;
-    if (setJustCompleted) {
+    if (setJustCompleted && timeoutScope === 'set') {
       nextT1 = 0;
       nextT2 = 0;
       setTimeoutsP1(0);
@@ -614,14 +776,24 @@ export default function VolleyballScoring({
 
   // Timeout Call
   const handleCallTimeout = (player: 'player1' | 'player2') => {
-    if (player === 'player1' && timeoutsP1 < 2) {
+    if (player === 'player1' && timeoutsP1 < maxTimeouts) {
       const next = timeoutsP1 + 1;
       setTimeoutsP1(next);
-      saveStateToDB(sets, undefined, undefined, servingTeam, next, timeoutsP2);
-    } else if (player === 'player2' && timeoutsP2 < 2) {
+      setActiveTimeoutTeam('player1');
+      setTimeoutCountdown(30);
+      setIsPaused(true);
+      playBeep(660, 0.25);
+      triggerVibrate(60);
+      saveStateToDB(sets, 'paused', undefined, servingTeam, next, timeoutsP2);
+    } else if (player === 'player2' && timeoutsP2 < maxTimeouts) {
       const next = timeoutsP2 + 1;
       setTimeoutsP2(next);
-      saveStateToDB(sets, undefined, undefined, servingTeam, timeoutsP1, next);
+      setActiveTimeoutTeam('player2');
+      setTimeoutCountdown(30);
+      setIsPaused(true);
+      playBeep(660, 0.25);
+      triggerVibrate(60);
+      saveStateToDB(sets, 'paused', undefined, servingTeam, timeoutsP1, next);
     }
   };
 
@@ -634,186 +806,501 @@ export default function VolleyballScoring({
   return (
     <div
       ref={scorecardRef}
-      className="vb-scoring-root"
+      className={`vb-scoring-root ${isScoringFullscreen ? 'fullscreen-scorecard' : ''}`}
       style={{
         background: '#0B1120',
         color: '#F8FAFC',
-        minHeight: '85vh',
+        minHeight: isScoringFullscreen ? '100dvh' : '85vh',
+        height: isScoringFullscreen ? '100dvh' : 'auto',
         display: 'flex',
         flexDirection: 'column',
         fontFamily: 'Inter, system-ui, sans-serif',
-        padding: '16px',
+        padding: isScoringFullscreen ? '0' : '16px',
         borderRadius: isScoringFullscreen ? '0' : '16px',
+        overflow: isScoringFullscreen ? 'hidden' : 'visible',
       }}
     >
-      {/* Top Header bar */}
-      <div
-        className="vb-header-bar"
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
-          paddingBottom: '12px',
-          marginBottom: '16px',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <span style={{ fontSize: '24px' }}>🏐</span>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <h2 style={{ fontSize: '18px', fontWeight: '700', margin: 0 }}>
-                Volleyball Match Umpire Console
-              </h2>
-              <span
-                style={{
-                  background: 'rgba(59, 130, 246, 0.2)',
-                  color: '#93C5FD',
-                  border: '1px solid rgba(59, 130, 246, 0.4)',
-                  padding: '2px 8px',
-                  borderRadius: '4px',
-                  fontSize: '11px',
-                  fontFamily: 'monospace',
-                  fontWeight: 800,
-                }}
-              >
-                {getUniqueMatchId(match)}
-              </span>
-            </div>
-            <div style={{ fontSize: '12px', color: '#94A3B8' }}>
-              {tournament?.name || 'Tournament'} • Set {currentSet.set_number} (Target: {currentTargetPoints} pts, win by 2)
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          {/* Live Stopwatch Badge */}
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              background: isPaused ? 'rgba(234, 179, 8, 0.15)' : matchStarted && !isMatchComplete ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.05)',
-              border: isPaused ? '1px solid rgba(234, 179, 8, 0.4)' : matchStarted && !isMatchComplete ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid rgba(255, 255, 255, 0.1)',
-              padding: '6px 14px',
-              borderRadius: '8px',
-              fontFamily: 'monospace',
-              fontSize: '14px',
-              fontWeight: '800',
-              color: isPaused ? '#FACC15' : matchStarted && !isMatchComplete ? '#4ADE80' : '#94A3B8',
-            }}
-          >
-            <span>⏱️</span>
-            <span>{formatTime(matchElapsed)}</span>
-            <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 4, background: isPaused ? '#EAB308' : matchStarted && !isMatchComplete ? '#22C55E' : '#64748B', color: '#0F172A', fontWeight: 900 }}>
-              {isPaused ? 'PAUSED' : matchStarted && !isMatchComplete ? 'RUNNING' : 'STOPPED'}
+      {/* FULLSCREEN HUD COMPACT TOP BAR (Single row, 36px high) */}
+      {isScoringFullscreen ? (
+        <div
+          className="vb-fs-topbar"
+          style={{
+            height: '38px',
+            minHeight: '38px',
+            background: 'linear-gradient(180deg, rgba(15, 23, 42, 0.95), rgba(11, 17, 32, 0.85))',
+            borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+            padding: '0 10px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '8px',
+            boxSizing: 'border-box',
+            zIndex: 50,
+          }}
+        >
+          {/* Left section: Exit & Match/Set Info */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <button
+              onClick={toggleFullscreen}
+              style={{
+                background: 'rgba(239, 68, 68, 0.2)',
+                border: '1px solid rgba(239, 68, 68, 0.4)',
+                color: '#FCA5A5',
+                borderRadius: '6px',
+                padding: '3px 8px',
+                fontSize: '11px',
+                fontWeight: '700',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+              }}
+              title="Exit Fullscreen Mode"
+            >
+              ✕ Exit
+            </button>
+            <span
+              style={{
+                background: 'rgba(59, 130, 246, 0.2)',
+                color: '#93C5FD',
+                border: '1px solid rgba(59, 130, 246, 0.4)',
+                padding: '2px 6px',
+                borderRadius: '4px',
+                fontSize: '11px',
+                fontFamily: 'monospace',
+                fontWeight: 800,
+              }}
+            >
+              {getUniqueMatchId(match)}
+            </span>
+            <span style={{ fontSize: '12px', fontWeight: '800', color: '#F1F5F9' }}>
+              SET {currentSet.set_number}
+            </span>
+            <span style={{ fontSize: '11px', color: '#94A3B8' }}>
+              (Target: {currentTargetPoints})
             </span>
           </div>
-          {/* Offline / Sync Status Badge */}
-          {(!isOnline || syncStatus === 'saved_locally' || syncStatus === 'syncing') && (
+
+          {/* Center section: Live Match Timer & Break Timer */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <div
               style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: 6,
-                background: syncStatus === 'syncing' ? 'rgba(59, 130, 246, 0.2)' : 'rgba(234, 179, 8, 0.2)',
-                border: syncStatus === 'syncing' ? '1px solid rgba(59, 130, 246, 0.4)' : '1px solid rgba(234, 179, 8, 0.4)',
-                padding: '6px 12px',
-                borderRadius: '8px',
+                gap: 5,
+                background: matchStarted && !isMatchComplete && !isPaused ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.06)',
+                border: matchStarted && !isMatchComplete && !isPaused ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid rgba(255, 255, 255, 0.12)',
+                padding: '2px 8px',
+                borderRadius: '6px',
+                fontFamily: 'monospace',
                 fontSize: '12px',
-                fontWeight: '700',
-                color: syncStatus === 'syncing' ? '#93C5FD' : '#FDE047',
+                fontWeight: '800',
+                color: matchStarted && !isMatchComplete && !isPaused ? '#4ADE80' : '#94A3B8',
               }}
-              title={
-                !isOnline
-                  ? 'Device is offline. Scores are safely saved locally on device and will auto-sync once connection restores.'
-                  : syncStatus === 'saved_locally'
-                  ? 'Score saved locally on device. Syncing to server...'
-                  : 'Syncing offline scores to server...'
-              }
             >
-              <span>{syncStatus === 'syncing' ? '🔄' : '📶'}</span>
-              <span>
-                {!isOnline ? 'Offline Mode (Saved Locally)' : syncStatus === 'saved_locally' ? 'Saved Locally (Pending Sync)' : 'Syncing Score...'}
+              <span>⏱️</span>
+              <span>{formatTime(matchElapsed)}</span>
+            </div>
+
+            {/* Fullscreen Active Team Timeout Badge */}
+            {activeTimeoutTeam && timeoutCountdown > 0 && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  background: 'rgba(239, 68, 68, 0.3)',
+                  border: '1px solid #EF4444',
+                  padding: '2px 8px',
+                  borderRadius: '6px',
+                  fontFamily: 'monospace',
+                  fontSize: '12px',
+                  fontWeight: '900',
+                  color: '#FCA5A5',
+                  animation: 'pulse 1.5s infinite',
+                }}
+              >
+                <span>⏱️ TO ({activeTimeoutTeam === 'player1' ? 'T1' : 'T2'})</span>
+                <span style={{ color: '#FFF' }}>{timeoutCountdown}s</span>
+              </div>
+            )}
+
+            {isPaused && !isMatchComplete && (!activeTimeoutTeam || timeoutCountdown === 0) && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  background: 'rgba(234, 179, 8, 0.25)',
+                  border: '1px solid #FACC15',
+                  padding: '2px 8px',
+                  borderRadius: '6px',
+                  fontFamily: 'monospace',
+                  fontSize: '12px',
+                  fontWeight: '900',
+                  color: '#FEF08A',
+                  animation: 'pulse 2s infinite',
+                }}
+              >
+                <span>⏸️ Break</span>
+                <span>{formatTime(pauseElapsed)}</span>
+              </div>
+            )}
+
+            {matchStarted && !isMatchComplete && (
+              <button
+                onClick={() => {
+                  const nextPaused = !isPaused;
+                  setIsPaused(nextPaused);
+                  saveStateToDB(sets, nextPaused ? 'paused' : 'running', undefined, undefined, undefined, undefined, matchElapsed);
+                }}
+                style={{
+                  background: isPaused ? '#10B981' : 'rgba(245, 158, 11, 0.2)',
+                  border: isPaused ? 'none' : '1px solid rgba(245, 158, 11, 0.5)',
+                  color: isPaused ? '#FFFFFF' : '#FBBF24',
+                  borderRadius: '6px',
+                  padding: '3px 8px',
+                  fontSize: '11px',
+                  fontWeight: '700',
+                  cursor: 'pointer',
+                }}
+              >
+                {isPaused ? '▶ Resume' : '⏸ Pause'}
+              </button>
+            )}
+
+            {/* Offline badge in fullscreen */}
+            {(!isOnline || syncStatus === 'saved_locally' || syncStatus === 'syncing') && (
+              <span
+                style={{
+                  background: syncStatus === 'syncing' ? 'rgba(59, 130, 246, 0.25)' : 'rgba(234, 179, 8, 0.25)',
+                  border: syncStatus === 'syncing' ? '1px solid rgba(59, 130, 246, 0.5)' : '1px solid rgba(234, 179, 8, 0.5)',
+                  color: syncStatus === 'syncing' ? '#93C5FD' : '#FDE047',
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                  fontSize: '10px',
+                  fontWeight: '800',
+                }}
+                title={!isOnline ? 'Offline' : syncStatus === 'saved_locally' ? 'Saved Locally' : 'Syncing'}
+              >
+                {syncStatus === 'syncing' ? '🔄' : '📶'} {!isOnline ? 'Offline' : 'Saved'}
+              </span>
+            )}
+          </div>
+
+          {/* Right section: Serving Team + Quick Undo + Court Switch */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span
+              style={{
+                fontSize: '11px',
+                fontWeight: '700',
+                color: servingTeam === 'player1' ? '#93C5FD' : '#6EE7B7',
+                background: servingTeam === 'player1' ? 'rgba(37, 99, 235, 0.2)' : 'rgba(16, 185, 129, 0.2)',
+                border: servingTeam === 'player1' ? '1px solid rgba(37, 99, 235, 0.4)' : '1px solid rgba(16, 185, 129, 0.4)',
+                padding: '2px 6px',
+                borderRadius: '4px',
+              }}
+            >
+              🏐 Serve: {servingTeam === 'player1' ? match.player1_name : match.player2_name}
+            </span>
+            <button
+              onClick={() => setServingTeam(prev => (prev === 'player1' ? 'player2' : 'player1'))}
+              style={{
+                background: 'rgba(255, 255, 255, 0.08)',
+                border: '1px solid rgba(255, 255, 255, 0.15)',
+                color: '#E2E8F0',
+                borderRadius: '6px',
+                padding: '3px 6px',
+                fontSize: '10px',
+                fontWeight: '700',
+                cursor: 'pointer',
+              }}
+              title="Change server"
+            >
+              ⇄ Serve
+            </button>
+            <button
+              onClick={handleUndo}
+              disabled={history.length === 0}
+              style={{
+                background: history.length > 0 ? 'rgba(234, 179, 8, 0.25)' : 'rgba(255, 255, 255, 0.04)',
+                border: '1px solid rgba(234, 179, 8, 0.4)',
+                color: history.length > 0 ? '#FDE047' : '#64748B',
+                borderRadius: '6px',
+                padding: '3px 8px',
+                fontSize: '11px',
+                fontWeight: '700',
+                cursor: history.length > 0 ? 'pointer' : 'not-allowed',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+              }}
+              title="Undo last point"
+            >
+              <IconUndo size={11} /> Undo
+            </button>
+            <button
+              onClick={() => setSidesSwapped(prev => !prev)}
+              style={{
+                background: sidesSwapped ? 'rgba(168, 85, 247, 0.3)' : 'rgba(255, 255, 255, 0.08)',
+                border: sidesSwapped ? '1px solid rgba(168, 85, 247, 0.6)' : '1px solid rgba(255, 255, 255, 0.15)',
+                color: sidesSwapped ? '#D8B4FE' : '#E2E8F0',
+                borderRadius: '6px',
+                padding: '3px 8px',
+                fontSize: '11px',
+                fontWeight: '700',
+                cursor: 'pointer',
+              }}
+              title="Switch court sides"
+            >
+              ⇄ Swap Sides
+            </button>
+            <button
+              onClick={() => setShowAttributionSheet(true)}
+              style={{
+                background: 'rgba(59, 130, 246, 0.2)',
+                border: '1px solid rgba(59, 130, 246, 0.4)',
+                color: '#93C5FD',
+                borderRadius: '6px',
+                padding: '3px 8px',
+                fontSize: '11px',
+                fontWeight: '700',
+                cursor: 'pointer',
+              }}
+              title="Open Point Reason Attribution Panel"
+            >
+              ⚡ Reason ▾
+            </button>
+          </div>
+        </div>
+      ) : (
+        /* Standard Header bar for desktop & normal view */
+        <div
+          className="vb-header-bar"
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            borderBottom: '1px solid rgba(255,255,255,0.08)',
+            paddingBottom: '12px',
+            marginBottom: '16px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <span style={{ fontSize: '24px' }}>🏐</span>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <h2 style={{ fontSize: '18px', fontWeight: '700', margin: 0 }}>
+                  Volleyball Match Umpire Console
+                </h2>
+                <span
+                  style={{
+                    background: 'rgba(59, 130, 246, 0.2)',
+                    color: '#93C5FD',
+                    border: '1px solid rgba(59, 130, 246, 0.4)',
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                    fontFamily: 'monospace',
+                    fontWeight: 800,
+                  }}
+                >
+                  {getUniqueMatchId(match)}
+                </span>
+              </div>
+              <div style={{ fontSize: '12px', color: '#94A3B8' }}>
+                {tournament?.name || 'Tournament'} • Set {currentSet.set_number} (Target: {currentTargetPoints} pts, win by 2)
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {/* Live Match Stopwatch Badge */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                background: matchStarted && !isMatchComplete && !isPaused ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                border: matchStarted && !isMatchComplete && !isPaused ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid rgba(255, 255, 255, 0.1)',
+                padding: '6px 14px',
+                borderRadius: '8px',
+                fontFamily: 'monospace',
+                fontSize: '14px',
+                fontWeight: '800',
+                color: matchStarted && !isMatchComplete && !isPaused ? '#4ADE80' : '#94A3B8',
+              }}
+            >
+              <span>⏱️</span>
+              <span>{formatTime(matchElapsed)}</span>
+              <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 4, background: isPaused ? '#EAB308' : matchStarted && !isMatchComplete ? '#22C55E' : '#64748B', color: '#0F172A', fontWeight: 900 }}>
+                {isPaused ? 'PAUSED' : matchStarted && !isMatchComplete ? 'RUNNING' : 'STOPPED'}
               </span>
             </div>
-          )}
 
-          {/* Switch Court Sides Button */}
-          <button
-            onClick={() => setSidesSwapped(prev => !prev)}
-            style={{
-              background: sidesSwapped ? 'rgba(168, 85, 247, 0.25)' : 'rgba(255, 255, 255, 0.08)',
-              border: sidesSwapped ? '1px solid rgba(168, 85, 247, 0.5)' : '1px solid rgba(255, 255, 255, 0.15)',
-              color: sidesSwapped ? '#D8B4FE' : '#E2E8F0',
-              borderRadius: '8px',
-              padding: '6px 12px',
-              fontSize: '12px',
-              fontWeight: '700',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              transition: 'all 0.2s ease',
-            }}
-            title="Switch court sides (Swap Left and Right teams on court)"
-          >
-            <span>⇄</span>
-            <span>Switch Sides</span>
-          </button>
+            {/* Active Team Timeout Countdown */}
+            {activeTimeoutTeam && timeoutCountdown > 0 && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  background: 'rgba(239, 68, 68, 0.25)',
+                  border: '1.5px solid #EF4444',
+                  padding: '6px 14px',
+                  borderRadius: '8px',
+                  fontFamily: 'monospace',
+                  fontSize: '14px',
+                  fontWeight: '900',
+                  color: '#FCA5A5',
+                  boxShadow: '0 0 16px rgba(239, 68, 68, 0.5)',
+                  animation: 'pulse 1.5s infinite',
+                }}
+              >
+                <span style={{ fontSize: 16 }}>⏱️</span>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                  <span style={{ fontSize: 9, color: '#FCA5A5', textTransform: 'uppercase', letterSpacing: '0.8px', fontWeight: 900, lineHeight: 1 }}>
+                    TIMEOUT: {activeTimeoutTeam === 'player1' ? match.player1_name : match.player2_name}
+                  </span>
+                  <span style={{ fontSize: 15, fontWeight: 900, color: '#FFF' }}>{timeoutCountdown}s</span>
+                </div>
+              </div>
+            )}
 
-          {/* Format Badge */}
-          <button
-            onClick={() => setShowConfigModal(true)}
-            style={{
-              background: 'rgba(59, 130, 246, 0.15)',
-              border: '1px solid rgba(59, 130, 246, 0.3)',
-              color: '#60A5FA',
-              borderRadius: '8px',
-              padding: '6px 12px',
-              fontSize: '12px',
-              fontWeight: '600',
-              cursor: 'pointer',
-            }}
-          >
-            ⚙️ Format: {matchFormat === 'best_of_5' ? 'Best of 5' : 'Best of 3'} ({standardSetPoints}/{decidingSetPoints} pts)
-          </button>
+            {/* Break / Timeout Stopwatch (Only shown when match is paused and no active 30s timeout) */}
+            {isPaused && !isMatchComplete && (!activeTimeoutTeam || timeoutCountdown === 0) && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  background: 'rgba(234, 179, 8, 0.2)',
+                  border: '1.5px solid #FACC15',
+                  padding: '6px 14px',
+                  borderRadius: '8px',
+                  fontFamily: 'monospace',
+                  fontSize: '14px',
+                  fontWeight: '900',
+                  color: '#FEF08A',
+                  boxShadow: '0 0 14px rgba(250, 204, 21, 0.35)',
+                  animation: 'pulse 2s infinite',
+                }}
+              >
+                <span style={{ fontSize: 16 }}>⏸️</span>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                  <span style={{ fontSize: 9, color: '#FDE047', textTransform: 'uppercase', letterSpacing: '0.8px', fontWeight: 900, lineHeight: 1 }}>
+                    Break Time
+                  </span>
+                  <span style={{ fontSize: 15, fontWeight: 900 }}>{formatTime(pauseElapsed)}</span>
+                </div>
+              </div>
+            )}
+            {/* Offline / Sync Status Badge */}
+            {(!isOnline || syncStatus === 'saved_locally' || syncStatus === 'syncing') && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  background: syncStatus === 'syncing' ? 'rgba(59, 130, 246, 0.2)' : 'rgba(234, 179, 8, 0.2)',
+                  border: syncStatus === 'syncing' ? '1px solid rgba(59, 130, 246, 0.4)' : '1px solid rgba(234, 179, 8, 0.4)',
+                  padding: '6px 12px',
+                  borderRadius: '8px',
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  color: syncStatus === 'syncing' ? '#93C5FD' : '#FDE047',
+                }}
+                title={
+                  !isOnline
+                    ? 'Device is offline. Scores are safely saved locally on device and will auto-sync once connection restores.'
+                    : syncStatus === 'saved_locally'
+                    ? 'Score saved locally on device. Syncing to server...'
+                    : 'Syncing offline scores to server...'
+                }
+              >
+                <span>{syncStatus === 'syncing' ? '🔄' : '📶'}</span>
+                <span>
+                  {!isOnline ? 'Offline Mode (Saved Locally)' : syncStatus === 'saved_locally' ? 'Saved Locally (Pending Sync)' : 'Syncing Score...'}
+                </span>
+              </div>
+            )}
 
-          <button
-            onClick={() => setShowMediaModal(true)}
-            style={{
-              background: 'rgba(239, 68, 68, 0.15)',
-              border: '1px solid rgba(239, 68, 68, 0.3)',
-              color: '#F87171',
-              borderRadius: '8px',
-              padding: '6px 12px',
-              fontSize: '12px',
-              fontWeight: '600',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-            }}
-          >
-            📺 YouTube / Media
-          </button>
+            {/* Switch Court Sides Button */}
+            <button
+              onClick={() => setSidesSwapped(prev => !prev)}
+              style={{
+                background: sidesSwapped ? 'rgba(168, 85, 247, 0.25)' : 'rgba(255, 255, 255, 0.08)',
+                border: sidesSwapped ? '1px solid rgba(168, 85, 247, 0.5)' : '1px solid rgba(255, 255, 255, 0.15)',
+                color: sidesSwapped ? '#D8B4FE' : '#E2E8F0',
+                borderRadius: '8px',
+                padding: '6px 12px',
+                fontSize: '12px',
+                fontWeight: '700',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                transition: 'all 0.2s ease',
+              }}
+              title="Switch court sides (Swap Left and Right teams on court)"
+            >
+              <span>⇄</span>
+              <span>Switch Sides</span>
+            </button>
 
-          <button
-            onClick={toggleFullscreen}
-            style={{
-              background: 'rgba(255, 255, 255, 0.06)',
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              color: '#E2E8F0',
-              borderRadius: '8px',
-              padding: '6px 12px',
-              fontSize: '12px',
-              cursor: 'pointer',
-            }}
-          >
-            {isScoringFullscreen ? 'Exit Fullscreen' : '⛶ Fullscreen'}
-          </button>
+            {/* Format Badge */}
+            <button
+              onClick={() => setShowConfigModal(true)}
+              style={{
+                background: 'rgba(59, 130, 246, 0.15)',
+                border: '1px solid rgba(59, 130, 246, 0.3)',
+                color: '#60A5FA',
+                borderRadius: '8px',
+                padding: '6px 12px',
+                fontSize: '12px',
+                fontWeight: '600',
+                cursor: 'pointer',
+              }}
+            >
+              ⚙️ Format: {matchFormat === 'best_of_5' ? 'Best of 5' : 'Best of 3'} ({standardSetPoints}/{decidingSetPoints} pts)
+            </button>
+
+            <button
+              onClick={() => setShowMediaModal(true)}
+              style={{
+                background: 'rgba(239, 68, 68, 0.15)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                color: '#F87171',
+                borderRadius: '8px',
+                padding: '6px 12px',
+                fontSize: '12px',
+                fontWeight: '600',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              📺 YouTube / Media
+            </button>
+
+            <button
+              onClick={toggleFullscreen}
+              style={{
+                background: 'rgba(255, 255, 255, 0.06)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                color: '#E2E8F0',
+                borderRadius: '8px',
+                padding: '6px 12px',
+                fontSize: '12px',
+                cursor: 'pointer',
+              }}
+            >
+              {isScoringFullscreen ? 'Exit Fullscreen' : '⛶ Fullscreen'}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Interactive Olympic / World Championship Volleyball Court Graphic Mat (Exact match to official FIVB court) */}
       <div
@@ -1146,19 +1633,40 @@ export default function VolleyballScoring({
                   )}
                 </div>
 
-                {/* Giant Center Points Display */}
-                <div
-                  style={{
-                    fontSize: 'clamp(54px, 13vw, 115px)',
-                    fontWeight: '900',
-                    color: '#FFFFFF',
-                    fontFamily: 'monospace',
-                    textShadow: '0 6px 25px rgba(0, 0, 0, 0.75)',
-                    userSelect: 'none',
-                    lineHeight: 1,
-                  }}
-                >
-                  {leftScore}
+                {/* Giant Center Points Display with Touch Indicator */}
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', pointerEvents: 'none' }}>
+                  <div
+                    style={{
+                      fontSize: isScoringFullscreen ? 'clamp(58px, 14vw, 110px)' : 'clamp(54px, 13vw, 115px)',
+                      fontWeight: '900',
+                      color: '#FFFFFF',
+                      fontFamily: 'monospace',
+                      textShadow: '0 6px 25px rgba(0, 0, 0, 0.75)',
+                      userSelect: 'none',
+                      lineHeight: 1,
+                    }}
+                  >
+                    {leftScore}
+                  </div>
+                  {isScoringFullscreen && !isMatchComplete && !isPaused && !currentSet.is_complete && (
+                    <div
+                      style={{
+                        marginTop: 4,
+                        background: 'rgba(37, 99, 235, 0.5)',
+                        border: '1px solid rgba(147, 197, 253, 0.6)',
+                        color: '#EFF6FF',
+                        fontSize: '11px',
+                        fontWeight: '800',
+                        padding: '2px 10px',
+                        borderRadius: '20px',
+                        letterSpacing: '0.5px',
+                        textTransform: 'uppercase',
+                        backdropFilter: 'blur(4px)',
+                      }}
+                    >
+                      +1 TAP
+                    </div>
+                  )}
                 </div>
 
                 {/* Bottom Bar: Sets Won & Timeouts */}
@@ -1180,7 +1688,7 @@ export default function VolleyballScoring({
                   </span>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto' }}>
                     <span style={{ fontSize: '10px', color: '#CBD5E1', marginRight: 2 }}>T/O:</span>
-                    {[1, 2].map(num => (
+                    {Array.from({ length: maxTimeouts }, (_, i) => i + 1).map(num => (
                       <div
                         key={num}
                         style={{
@@ -1192,7 +1700,7 @@ export default function VolleyballScoring({
                       />
                     ))}
                     <button
-                      disabled={leftTimeouts >= 2 || !matchStarted || isMatchComplete}
+                      disabled={leftTimeouts >= maxTimeouts || !matchStarted || isMatchComplete}
                       onClick={(e) => {
                         e.stopPropagation();
                         handleCallTimeout(leftTeamKey);
@@ -1206,10 +1714,11 @@ export default function VolleyballScoring({
                         padding: '1px 6px',
                         fontSize: '10px',
                         fontWeight: '700',
-                        cursor: leftTimeouts < 2 ? 'pointer' : 'not-allowed',
+                        cursor: leftTimeouts < maxTimeouts ? 'pointer' : 'not-allowed',
                       }}
+                      title={`Call 30s Timeout for ${leftName} (${leftTimeouts}/${maxTimeouts})`}
                     >
-                      T/O
+                      ⏱ T/O ({leftTimeouts}/{maxTimeouts})
                     </button>
                   </div>
                 </div>
@@ -1298,19 +1807,40 @@ export default function VolleyballScoring({
                   </div>
                 </div>
 
-                {/* Giant Center Points Display */}
-                <div
-                  style={{
-                    fontSize: 'clamp(54px, 13vw, 115px)',
-                    fontWeight: '900',
-                    color: '#FFFFFF',
-                    fontFamily: 'monospace',
-                    textShadow: '0 6px 25px rgba(0, 0, 0, 0.75)',
-                    userSelect: 'none',
-                    lineHeight: 1,
-                  }}
-                >
-                  {rightScore}
+                {/* Giant Center Points Display with Touch Indicator */}
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', pointerEvents: 'none' }}>
+                  <div
+                    style={{
+                      fontSize: isScoringFullscreen ? 'clamp(58px, 14vw, 110px)' : 'clamp(54px, 13vw, 115px)',
+                      fontWeight: '900',
+                      color: '#FFFFFF',
+                      fontFamily: 'monospace',
+                      textShadow: '0 6px 25px rgba(0, 0, 0, 0.75)',
+                      userSelect: 'none',
+                      lineHeight: 1,
+                    }}
+                  >
+                    {rightScore}
+                  </div>
+                  {isScoringFullscreen && !isMatchComplete && !isPaused && !currentSet.is_complete && (
+                    <div
+                      style={{
+                        marginTop: 4,
+                        background: 'rgba(16, 185, 129, 0.5)',
+                        border: '1px solid rgba(110, 231, 183, 0.6)',
+                        color: '#ECFDF5',
+                        fontSize: '11px',
+                        fontWeight: '800',
+                        padding: '2px 10px',
+                        borderRadius: '20px',
+                        letterSpacing: '0.5px',
+                        textTransform: 'uppercase',
+                        backdropFilter: 'blur(4px)',
+                      }}
+                    >
+                      +1 TAP
+                    </div>
+                  )}
                 </div>
 
                 {/* Bottom Bar: Sets Won & Timeouts */}
@@ -1329,7 +1859,7 @@ export default function VolleyballScoring({
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto' }}>
                     <button
-                      disabled={rightTimeouts >= 2 || !matchStarted || isMatchComplete}
+                      disabled={rightTimeouts >= maxTimeouts || !matchStarted || isMatchComplete}
                       onClick={(e) => {
                         e.stopPropagation();
                         handleCallTimeout(rightTeamKey);
@@ -1343,13 +1873,14 @@ export default function VolleyballScoring({
                         padding: '1px 6px',
                         fontSize: '10px',
                         fontWeight: '700',
-                        cursor: rightTimeouts < 2 ? 'pointer' : 'not-allowed',
+                        cursor: rightTimeouts < maxTimeouts ? 'pointer' : 'not-allowed',
                       }}
+                      title={`Call 30s Timeout for ${rightName} (${rightTimeouts}/${maxTimeouts})`}
                     >
-                      T/O
+                      ⏱ T/O ({rightTimeouts}/{maxTimeouts})
                     </button>
                     <span style={{ fontSize: '10px', color: '#CBD5E1' }}>T/O:</span>
-                    {[1, 2].map(num => (
+                    {Array.from({ length: maxTimeouts }, (_, i) => i + 1).map(num => (
                       <div
                         key={num}
                         style={{
@@ -1440,15 +1971,28 @@ export default function VolleyballScoring({
                 <strong style={{ color: '#FFF' }}>{p2SetsWon}</strong> ({match.player2_name})
               </div>
 
-              {currentSetIdx < sets.length - 1 && (
+              {(currentSetIdx < sets.length - 1 || sets.length < (matchFormat === 'best_of_5' ? 5 : 3)) && (
                 <button
                   onClick={() => {
                     // Advance to next set by switching teams / resetting state for next set
-                    const nextSetNum = currentSetIdx + 2;
+                    const targetCount = matchFormat === 'best_of_5' ? 5 : 3;
+                    let nextSets = [...sets];
+                    if (nextSets.length < targetCount) {
+                      for (let i = nextSets.length + 1; i <= targetCount; i++) {
+                        nextSets.push({
+                          set_number: i,
+                          player1_score: 0,
+                          player2_score: 0,
+                          is_complete: false,
+                          winner_id: undefined,
+                        });
+                      }
+                      setSets(nextSets);
+                    }
                     const nextServing = currentSet.winner_id === 'player1' ? 'player1' : 'player2';
                     setServingTeam(nextServing);
                     // Rotate court sides if desired or maintain
-                    saveStateToDB(sets, 'running', undefined, nextServing, 0, 0);
+                    saveStateToDB(nextSets, 'running', undefined, nextServing, 0, 0);
                   }}
                   style={{
                     marginTop: 8,
@@ -1466,7 +2010,7 @@ export default function VolleyballScoring({
                     gap: 8,
                   }}
                 >
-                  ▶ Start Set {currentSetIdx + 2}
+                  ▶ Start Set {currentSet.set_number + 1}
                 </button>
               )}
             </div>
@@ -1496,9 +2040,18 @@ export default function VolleyballScoring({
               </div>
               <div style={{ fontSize: 18, fontWeight: 800, color: '#FFFFFF' }}>
                 Match Winner:{' '}
-                <span style={{ color: p1SetsWon >= setsToWin ? '#60A5FA' : '#34D399' }}>
-                  {p1SetsWon >= setsToWin ? match.player1_name : match.player2_name}
-                </span>{' '}
+                {(() => {
+                  const wonCheck = isVolleyballMatchWon(sets, matchFormat);
+                  const isP1 = wonCheck.winnerId === 'player1' || p1SetsWon >= setsToWin || match.winner_id === match.player1_id;
+                  const isP2 = wonCheck.winnerId === 'player2' || p2SetsWon >= setsToWin || match.winner_id === match.player2_id;
+                  const winnerName = isP1 ? match.player1_name : isP2 ? match.player2_name : (p1SetsWon > p2SetsWon ? match.player1_name : match.player2_name);
+                  const winnerColor = isP1 ? '#60A5FA' : '#34D399';
+                  return (
+                    <span style={{ color: winnerColor }}>
+                      {winnerName}
+                    </span>
+                  );
+                })()}{' '}
                 ({p1SetsWon} - {p2SetsWon} Sets)
               </div>
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
@@ -1539,446 +2092,632 @@ export default function VolleyballScoring({
             </div>
           )}
 
-          {/* Paused Overlay on Court */}
+          {/* Paused Overlay on Court with Live Break Stopwatch */}
           {isPaused && !isMatchComplete && (
             <div
               style={{
                 position: 'absolute',
                 inset: 0,
-                background: 'rgba(15, 23, 42, 0.88)',
-                backdropFilter: 'blur(8px)',
+                background: 'rgba(15, 23, 42, 0.90)',
+                backdropFilter: 'blur(10px)',
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
                 justifyContent: 'center',
                 zIndex: 40,
-                gap: 14,
+                gap: 16,
               }}
             >
-              <div style={{ fontSize: 16, fontWeight: 800, color: '#FACC15', letterSpacing: '0.5px' }}>
-                ⏸ VOLLEYBALL MATCH PAUSED
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#FACC15', letterSpacing: '1px', textTransform: 'uppercase' }}>
+                  ⏸ Match Paused / Break in Progress
+                </div>
+                {/* Prominent Break Stopwatch */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    background: 'rgba(234, 179, 8, 0.15)',
+                    border: '2px solid #FACC15',
+                    padding: '8px 24px',
+                    borderRadius: '12px',
+                    boxShadow: '0 0 20px rgba(250, 204, 21, 0.3)',
+                  }}
+                >
+                  <span style={{ fontSize: 24 }}>⏱️</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                    <span style={{ fontSize: 10, color: '#FDE047', fontWeight: 800, letterSpacing: '1px', textTransform: 'uppercase' }}>
+                      Break Duration
+                    </span>
+                    <span style={{ fontSize: 28, fontWeight: 900, fontFamily: 'monospace', color: '#FFFFFF', letterSpacing: '1px' }}>
+                      {formatTime(pauseElapsed)}
+                    </span>
+                  </div>
+                </div>
               </div>
+
               <button
                 onClick={() => {
                   setIsPaused(false);
                   saveStateToDB(sets, 'running', undefined, undefined, undefined, undefined, matchElapsed);
                 }}
                 style={{
-                  padding: '10px 24px',
+                  padding: '12px 28px',
                   borderRadius: '10px',
                   fontWeight: 800,
                   background: 'linear-gradient(135deg, #10B981, #059669)',
                   color: '#FFFFFF',
                   border: 'none',
                   cursor: 'pointer',
-                  fontSize: 14,
-                  boxShadow: '0 4px 14px rgba(16, 185, 129, 0.4)',
+                  fontSize: 15,
+                  boxShadow: '0 4px 16px rgba(16, 185, 129, 0.45)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
                 }}
               >
-                ▶ Resume Play
+                <span>▶</span> Resume Play
               </button>
             </div>
           )}
         </div>
 
-        {/* Mobile Team Attribution Switcher Tabs */}
-        <div className="vb-mobile-team-tabs">
-          <button
-            type="button"
-            className={`vb-mobile-team-tab ${mobileAttributionTab === 'player1' ? 'active-t1' : ''}`}
-            onClick={() => setMobileAttributionTab('player1')}
-          >
-            🔵 {match.player1_name} Reason
-          </button>
-          <button
-            type="button"
-            className={`vb-mobile-team-tab ${mobileAttributionTab === 'player2' ? 'active-t2' : ''}`}
-            onClick={() => setMobileAttributionTab('player2')}
-          >
-            🟢 {match.player2_name} Reason
-          </button>
-        </div>
+        {/* Mobile Team Attribution Switcher Tabs (Only in standard portrait/desktop view) */}
+        {!isScoringFullscreen && (
+          <div className="vb-mobile-team-tabs">
+            <button
+              type="button"
+              className={`vb-mobile-team-tab ${mobileAttributionTab === 'player1' ? 'active-t1' : ''}`}
+              onClick={() => setMobileAttributionTab('player1')}
+            >
+              🔵 {match.player1_name} Reason
+            </button>
+            <button
+              type="button"
+              className={`vb-mobile-team-tab ${mobileAttributionTab === 'player2' ? 'active-t2' : ''}`}
+              onClick={() => setMobileAttributionTab('player2')}
+            >
+              🟢 {match.player2_name} Reason
+            </button>
+          </div>
+        )}
 
-        {/* FIVB POINT CATEGORY ATTRIBUTION CONSOLE */}
-        <div
-          className="vb-attribution-console"
-          style={{
-            width: '100%',
-            maxWidth: isScoringFullscreen ? '94vw' : '100%',
-            marginTop: '10px',
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            gap: '12px',
-          }}
-        >
-          {/* Team 1 Point Options */}
+        {/* FIVB POINT CATEGORY ATTRIBUTION CONSOLE (Only in standard view) */}
+        {!isScoringFullscreen && (
           <div
-            className={`vb-team1-panel ${mobileAttributionTab === 'player1' ? 'vb-tab-visible' : 'vb-tab-hidden'}`}
+            className="vb-attribution-console"
             style={{
-              background: 'rgba(30, 41, 59, 0.7)',
-              border: '1px solid rgba(59, 130, 246, 0.3)',
-              borderRadius: '12px',
-              padding: '10px 12px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '6px',
+              width: '100%',
+              maxWidth: '100%',
+              marginTop: '10px',
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: '12px',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 12, fontWeight: 800, color: '#93C5FD' }}>
-                +{match.player1_name} Point Reason:
-              </span>
-              <button
-                onClick={() => handleAddPoint('player1', 'quick')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
-                style={{
-                  background: '#2563EB',
-                  border: 'none',
-                  color: '#FFFFFF',
-                  padding: '3px 10px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                }}
-              >
-                +1 Quick
-              </button>
+            {/* Team 1 Point Options */}
+            <div
+              className={`vb-team1-panel ${mobileAttributionTab === 'player1' ? 'vb-tab-visible' : 'vb-tab-hidden'}`}
+              style={{
+                background: 'rgba(30, 41, 59, 0.7)',
+                border: '1px solid rgba(59, 130, 246, 0.3)',
+                borderRadius: '12px',
+                padding: '10px 12px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#93C5FD' }}>
+                  +{match.player1_name} Point Reason:
+                </span>
+                <button
+                  onClick={() => handleAddPoint('player1', 'quick')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    background: '#2563EB',
+                    border: 'none',
+                    color: '#FFFFFF',
+                    padding: '3px 10px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  +1 Quick
+                </button>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                <button
+                  onClick={() => handleAddPoint('player1', 'attack')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(37, 99, 235, 0.2)',
+                    border: '1px solid rgba(37, 99, 235, 0.4)',
+                    color: '#BFDBFE',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  💥 Spike / Attack Kill
+                </button>
+                <button
+                  onClick={() => handleAddPoint('player1', 'block')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(37, 99, 235, 0.2)',
+                    border: '1px solid rgba(37, 99, 235, 0.4)',
+                    color: '#BFDBFE',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  🛡️ Stuff Block Kill
+                </button>
+                <button
+                  onClick={() => handleAddPoint('player1', 'ace')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(37, 99, 235, 0.2)',
+                    border: '1px solid rgba(37, 99, 235, 0.4)',
+                    color: '#BFDBFE',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  ⚡ Service Ace
+                </button>
+                <button
+                  onClick={() => handleAddPoint('player1', 'opp_attack_out')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(239, 68, 68, 0.15)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: '#FCA5A5',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  🚫 Opp Hit Out / Wide
+                </button>
+                <button
+                  onClick={() => handleAddPoint('player1', 'opp_net_fault')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(239, 68, 68, 0.15)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: '#FCA5A5',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  ⚠️ Opp Net Touch / Fault
+                </button>
+                <button
+                  onClick={() => handleAddPoint('player1', 'opp_service_err')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(239, 68, 68, 0.15)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: '#FCA5A5',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  ❌ Opp Serve In Net/Out
+                </button>
+              </div>
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+
+            {/* Team 2 Point Options */}
+            <div
+              className={`vb-team2-panel ${mobileAttributionTab === 'player2' ? 'vb-tab-visible' : 'vb-tab-hidden'}`}
+              style={{
+                background: 'rgba(30, 41, 59, 0.7)',
+                border: '1px solid rgba(16, 185, 129, 0.3)',
+                borderRadius: '12px',
+                padding: '10px 12px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 12, fontWeight: 800, color: '#6EE7B7' }}>
+                  +{match.player2_name} Point Reason:
+                </span>
+                <button
+                  onClick={() => handleAddPoint('player2', 'quick')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    background: '#10B981',
+                    border: 'none',
+                    color: '#FFFFFF',
+                    padding: '3px 10px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 800,
+                    cursor: 'pointer',
+                  }}
+                >
+                  +1 Quick
+                </button>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                <button
+                  onClick={() => handleAddPoint('player2', 'attack')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(16, 185, 129, 0.2)',
+                    border: '1px solid rgba(16, 185, 129, 0.4)',
+                    color: '#A7F3D0',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  💥 Spike / Attack Kill
+                </button>
+                <button
+                  onClick={() => handleAddPoint('player2', 'block')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(16, 185, 129, 0.2)',
+                    border: '1px solid rgba(16, 185, 129, 0.4)',
+                    color: '#A7F3D0',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  🛡️ Stuff Block Kill
+                </button>
+                <button
+                  onClick={() => handleAddPoint('player2', 'ace')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(16, 185, 129, 0.2)',
+                    border: '1px solid rgba(16, 185, 129, 0.4)',
+                    color: '#A7F3D0',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  ⚡ Service Ace
+                </button>
+                <button
+                  onClick={() => handleAddPoint('player2', 'opp_attack_out')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(239, 68, 68, 0.15)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: '#FCA5A5',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  🚫 Opp Hit Out / Wide
+                </button>
+                <button
+                  onClick={() => handleAddPoint('player2', 'opp_net_fault')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(239, 68, 68, 0.15)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: '#FCA5A5',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  ⚠️ Opp Net Touch / Fault
+                </button>
+                <button
+                  onClick={() => handleAddPoint('player2', 'opp_service_err')}
+                  disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                  style={{
+                    flex: '1 1 45%',
+                    background: 'rgba(239, 68, 68, 0.15)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: '#FCA5A5',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  ❌ Opp Serve In Net/Out
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Set Scores Bar & Undo Point Strip underneath court (Only in standard view) */}
+        {!isScoringFullscreen && (
+          <div
+            className="vb-sets-undo-strip"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              width: '100%',
+              maxWidth: '100%',
+              marginTop: '12px',
+              background: 'rgba(15, 23, 42, 0.6)',
+              padding: '8px 16px',
+              borderRadius: '12px',
+              border: '1px solid rgba(255,255,255,0.08)',
+            }}
+          >
+            {/* Sets summary badges */}
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <span style={{ fontSize: '11px', fontWeight: '700', color: '#94A3B8' }}>SETS:</span>
+              {sets.map((s, idx) => (
+                <span
+                  key={s.set_number}
+                  style={{
+                    padding: '3px 8px',
+                    borderRadius: '6px',
+                    background: idx === currentSetIdx ? 'rgba(59, 130, 246, 0.25)' : 'rgba(255,255,255,0.05)',
+                    border: idx === currentSetIdx ? '1px solid #3B82F6' : '1px solid rgba(255,255,255,0.1)',
+                    color: idx === currentSetIdx ? '#93C5FD' : '#E2E8F0',
+                    fontWeight: idx === currentSetIdx ? '800' : '600',
+                    fontSize: '12px',
+                    fontFamily: 'monospace',
+                  }}
+                >
+                  S{s.set_number}: {s.player1_score}-{s.player2_score}
+                  {s.is_complete ? '✓' : ''}
+                </span>
+              ))}
+            </div>
+
+            {/* Quick Undo & Manual Rotate buttons */}
+            <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
               <button
-                onClick={() => handleAddPoint('player1', 'attack')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                onClick={() => setShowStatsModal(true)}
                 style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(37, 99, 235, 0.2)',
-                  border: '1px solid rgba(37, 99, 235, 0.4)',
-                  color: '#BFDBFE',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
+                  background: 'rgba(147, 51, 234, 0.15)',
+                  border: '1px solid rgba(147, 51, 234, 0.3)',
+                  color: '#C084FC',
+                  borderRadius: '8px',
+                  padding: '6px 12px',
+                  fontSize: '12px',
+                  fontWeight: '700',
                   cursor: 'pointer',
-                  textAlign: 'left',
                 }}
               >
-                💥 Spike / Attack Kill
+                📊 Match Stats
               </button>
               <button
-                onClick={() => handleAddPoint('player1', 'block')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                onClick={handleUndo}
+                disabled={history.length === 0}
                 style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(37, 99, 235, 0.2)',
-                  border: '1px solid rgba(37, 99, 235, 0.4)',
-                  color: '#BFDBFE',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  textAlign: 'left',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  background: history.length > 0 ? 'rgba(234, 179, 8, 0.15)' : 'rgba(255,255,255,0.04)',
+                  border: '1px solid rgba(234, 179, 8, 0.3)',
+                  color: history.length > 0 ? '#FDE047' : '#64748B',
+                  borderRadius: '8px',
+                  padding: '6px 12px',
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  cursor: history.length > 0 ? 'pointer' : 'not-allowed',
                 }}
               >
-                🛡️ Stuff Block Kill
+                <IconUndo size={13} /> Undo Point
               </button>
               <button
-                onClick={() => handleAddPoint('player1', 'ace')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
-                style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(37, 99, 235, 0.2)',
-                  border: '1px solid rgba(37, 99, 235, 0.4)',
-                  color: '#BFDBFE',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  textAlign: 'left',
+                onClick={() => {
+                  const nextRot1 = rotateTeamLineup(rotationP1);
+                  setRotationP1(nextRot1);
+                  saveStateToDB(sets, undefined, undefined, servingTeam, timeoutsP1, timeoutsP2, undefined, statsP1, statsP2, nextRot1, rotationP2);
                 }}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.06)',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  color: '#E2E8F0',
+                  borderRadius: '8px',
+                  padding: '6px 10px',
+                  fontSize: '11px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                }}
+                title="Manually rotate Team 1 positions"
               >
-                ⚡ Service Ace
+                🔄 Rot T1
               </button>
               <button
-                onClick={() => handleAddPoint('player1', 'opp_attack_out')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                onClick={() => {
+                  const nextRot2 = rotateTeamLineup(rotationP2);
+                  setRotationP2(nextRot2);
+                  saveStateToDB(sets, undefined, undefined, servingTeam, timeoutsP1, timeoutsP2, undefined, statsP1, statsP2, rotationP1, nextRot2);
+                }}
                 style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(239, 68, 68, 0.15)',
-                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  background: 'rgba(255, 255, 255, 0.06)',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  color: '#E2E8F0',
+                  borderRadius: '8px',
+                  padding: '6px 10px',
+                  fontSize: '11px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                }}
+                title="Manually rotate Team 2 positions"
+              >
+                🔄 Rot T2
+              </button>
+              <button
+                disabled={isPaused || (!sidesSwapped ? timeoutsP1 >= maxTimeouts : timeoutsP2 >= maxTimeouts) || !matchStarted || isMatchComplete}
+                onClick={() => handleCallTimeout(!sidesSwapped ? 'player1' : 'player2')}
+                style={{
+                  background: (!sidesSwapped ? timeoutsP1 >= maxTimeouts : timeoutsP2 >= maxTimeouts) ? 'rgba(255, 255, 255, 0.04)' : 'rgba(239, 68, 68, 0.15)',
+                  border: '1px solid rgba(239, 68, 68, 0.4)',
                   color: '#FCA5A5',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  textAlign: 'left',
+                  borderRadius: '8px',
+                  padding: '6px 12px',
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  cursor: (!sidesSwapped ? timeoutsP1 >= maxTimeouts : timeoutsP2 >= maxTimeouts) ? 'not-allowed' : 'pointer',
                 }}
+                title={`Call 30s Timeout for ${!sidesSwapped ? match.player1_name : match.player2_name}`}
               >
-                🚫 Opp Hit Out / Wide
+                ⏱ TO {!sidesSwapped ? 'L' : 'R'} ({(!sidesSwapped ? timeoutsP1 : timeoutsP2)}/{maxTimeouts})
               </button>
               <button
-                onClick={() => handleAddPoint('player1', 'opp_net_fault')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                disabled={isPaused || (!sidesSwapped ? timeoutsP2 >= maxTimeouts : timeoutsP1 >= maxTimeouts) || !matchStarted || isMatchComplete}
+                onClick={() => handleCallTimeout(!sidesSwapped ? 'player2' : 'player1')}
                 style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(239, 68, 68, 0.15)',
-                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  background: (!sidesSwapped ? timeoutsP2 >= maxTimeouts : timeoutsP1 >= maxTimeouts) ? 'rgba(255, 255, 255, 0.04)' : 'rgba(239, 68, 68, 0.15)',
+                  border: '1px solid rgba(239, 68, 68, 0.4)',
                   color: '#FCA5A5',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  textAlign: 'left',
+                  borderRadius: '8px',
+                  padding: '6px 12px',
+                  fontSize: '12px',
+                  fontWeight: '700',
+                  cursor: (!sidesSwapped ? timeoutsP2 >= maxTimeouts : timeoutsP1 >= maxTimeouts) ? 'not-allowed' : 'pointer',
                 }}
+                title={`Call 30s Timeout for ${!sidesSwapped ? match.player2_name : match.player1_name}`}
               >
-                ⚠️ Opp Net Touch / Fault
+                ⏱ TO {!sidesSwapped ? 'R' : 'L'} ({(!sidesSwapped ? timeoutsP2 : timeoutsP1)}/{maxTimeouts})
               </button>
               <button
-                onClick={() => handleAddPoint('player1', 'opp_service_err')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                onClick={() => setShowConfigModal(true)}
                 style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(239, 68, 68, 0.15)',
-                  border: '1px solid rgba(239, 68, 68, 0.3)',
-                  color: '#FCA5A5',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
+                  background: 'rgba(59, 130, 246, 0.15)',
+                  border: '1px solid rgba(59, 130, 246, 0.3)',
+                  color: '#93C5FD',
+                  borderRadius: '8px',
+                  padding: '6px 12px',
+                  fontSize: '12px',
+                  fontWeight: '700',
                   cursor: 'pointer',
-                  textAlign: 'left',
+                }}
+                title="Configure Timeouts and Set Points"
+              >
+                ⚙️ Timeouts
+              </button>
+              <button
+                onClick={() => setServingTeam(prev => (prev === 'player1' ? 'player2' : 'player1'))}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.06)',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  color: '#E2E8F0',
+                  borderRadius: '8px',
+                  padding: '6px 12px',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
                 }}
               >
-                ❌ Opp Serve In Net/Out
+                ⇄ Change Serve
               </button>
             </div>
           </div>
+        )}
+      </div>
 
-          {/* Team 2 Point Options */}
-          <div
-            className={`vb-team2-panel ${mobileAttributionTab === 'player2' ? 'vb-tab-visible' : 'vb-tab-hidden'}`}
-            style={{
-              background: 'rgba(30, 41, 59, 0.7)',
-              border: '1px solid rgba(16, 185, 129, 0.3)',
-              borderRadius: '12px',
-              padding: '10px 12px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '6px',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: 12, fontWeight: 800, color: '#6EE7B7' }}>
-                +{match.player2_name} Point Reason:
-              </span>
-              <button
-                onClick={() => handleAddPoint('player2', 'quick')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
-                style={{
-                  background: '#10B981',
-                  border: 'none',
-                  color: '#FFFFFF',
-                  padding: '3px 10px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 800,
-                  cursor: 'pointer',
-                }}
-              >
-                +1 Quick
-              </button>
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-              <button
-                onClick={() => handleAddPoint('player2', 'attack')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
-                style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(16, 185, 129, 0.2)',
-                  border: '1px solid rgba(16, 185, 129, 0.4)',
-                  color: '#A7F3D0',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                💥 Spike / Attack Kill
-              </button>
-              <button
-                onClick={() => handleAddPoint('player2', 'block')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
-                style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(16, 185, 129, 0.2)',
-                  border: '1px solid rgba(16, 185, 129, 0.4)',
-                  color: '#A7F3D0',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                🛡️ Stuff Block Kill
-              </button>
-              <button
-                onClick={() => handleAddPoint('player2', 'ace')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
-                style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(16, 185, 129, 0.2)',
-                  border: '1px solid rgba(16, 185, 129, 0.4)',
-                  color: '#A7F3D0',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                ⚡ Service Ace
-              </button>
-              <button
-                onClick={() => handleAddPoint('player2', 'opp_attack_out')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
-                style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(239, 68, 68, 0.15)',
-                  border: '1px solid rgba(239, 68, 68, 0.3)',
-                  color: '#FCA5A5',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                🚫 Opp Hit Out / Wide
-              </button>
-              <button
-                onClick={() => handleAddPoint('player2', 'opp_net_fault')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
-                style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(239, 68, 68, 0.15)',
-                  border: '1px solid rgba(239, 68, 68, 0.3)',
-                  color: '#FCA5A5',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                ⚠️ Opp Net Touch / Fault
-              </button>
-              <button
-                onClick={() => handleAddPoint('player2', 'opp_service_err')}
-                disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
-                style={{
-                  flex: '1 1 45%',
-                  background: 'rgba(239, 68, 68, 0.15)',
-                  border: '1px solid rgba(239, 68, 68, 0.3)',
-                  color: '#FCA5A5',
-                  padding: '6px 8px',
-                  borderRadius: '6px',
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                }}
-              >
-                ❌ Opp Serve In Net/Out
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Set Scores Bar & Undo Point Strip underneath court */}
+      {/* FULLSCREEN PRO HUD COMPACT BOTTOM DOCK (Single row, 38px high) */}
+      {isScoringFullscreen ? (
         <div
-          className="vb-sets-undo-strip"
+          className="vb-fs-bottombar"
           style={{
+            height: '38px',
+            minHeight: '38px',
+            background: 'linear-gradient(0deg, rgba(15, 23, 42, 0.95), rgba(11, 17, 32, 0.85))',
+            borderTop: '1px solid rgba(255, 255, 255, 0.1)',
+            padding: '0 10px',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
-            width: '100%',
-            maxWidth: isScoringFullscreen ? '94vw' : '100%',
-            marginTop: '12px',
-            background: 'rgba(15, 23, 42, 0.6)',
-            padding: '8px 16px',
-            borderRadius: '12px',
-            border: '1px solid rgba(255,255,255,0.08)',
+            gap: '8px',
+            boxSizing: 'border-box',
+            zIndex: 50,
           }}
         >
-          {/* Sets summary badges */}
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <span style={{ fontSize: '11px', fontWeight: '700', color: '#94A3B8' }}>SETS:</span>
+          {/* Sets summary pills */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '10px', fontWeight: '800', color: '#94A3B8' }}>SETS:</span>
             {sets.map((s, idx) => (
               <span
                 key={s.set_number}
                 style={{
-                  padding: '3px 8px',
-                  borderRadius: '6px',
-                  background: idx === currentSetIdx ? 'rgba(59, 130, 246, 0.25)' : 'rgba(255,255,255,0.05)',
+                  padding: '1px 6px',
+                  borderRadius: '4px',
+                  background: idx === currentSetIdx ? 'rgba(59, 130, 246, 0.3)' : 'rgba(255,255,255,0.06)',
                   border: idx === currentSetIdx ? '1px solid #3B82F6' : '1px solid rgba(255,255,255,0.1)',
-                  color: idx === currentSetIdx ? '#93C5FD' : '#E2E8F0',
+                  color: idx === currentSetIdx ? '#93C5FD' : '#CBD5E1',
                   fontWeight: idx === currentSetIdx ? '800' : '600',
-                  fontSize: '12px',
+                  fontSize: '11px',
                   fontFamily: 'monospace',
                 }}
               >
-                S{s.set_number}: {s.player1_score}-{s.player2_score}
-                {s.is_complete ? '✓' : ''}
+                S{s.set_number}: {s.player1_score}-{s.player2_score}{s.is_complete ? '✓' : ''}
               </span>
             ))}
           </div>
 
-          {/* Quick Undo & Manual Rotate buttons */}
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <button
-              onClick={() => setShowStatsModal(true)}
-              style={{
-                background: 'rgba(147, 51, 234, 0.15)',
-                border: '1px solid rgba(147, 51, 234, 0.3)',
-                color: '#C084FC',
-                borderRadius: '8px',
-                padding: '6px 12px',
-                fontSize: '12px',
-                fontWeight: '700',
-                cursor: 'pointer',
-              }}
-            >
-              📊 Match Stats
-            </button>
-            <button
-              onClick={handleUndo}
-              disabled={history.length === 0}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                background: history.length > 0 ? 'rgba(234, 179, 8, 0.15)' : 'rgba(255,255,255,0.04)',
-                border: '1px solid rgba(234, 179, 8, 0.3)',
-                color: history.length > 0 ? '#FDE047' : '#64748B',
-                borderRadius: '8px',
-                padding: '6px 12px',
-                fontSize: '12px',
-                fontWeight: '700',
-                cursor: history.length > 0 ? 'pointer' : 'not-allowed',
-              }}
-            >
-              <IconUndo size={13} /> Undo Point
-            </button>
+          {/* Center: Rotation & Sound */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <button
               onClick={() => {
                 const nextRot1 = rotateTeamLineup(rotationP1);
@@ -1986,16 +2725,16 @@ export default function VolleyballScoring({
                 saveStateToDB(sets, undefined, undefined, servingTeam, timeoutsP1, timeoutsP2, undefined, statsP1, statsP2, nextRot1, rotationP2);
               }}
               style={{
-                background: 'rgba(255, 255, 255, 0.06)',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
+                background: 'rgba(255, 255, 255, 0.08)',
+                border: '1px solid rgba(255, 255, 255, 0.15)',
                 color: '#E2E8F0',
-                borderRadius: '8px',
-                padding: '6px 10px',
-                fontSize: '11px',
-                fontWeight: '600',
+                borderRadius: '6px',
+                padding: '3px 8px',
+                fontSize: '10px',
+                fontWeight: '700',
                 cursor: 'pointer',
               }}
-              title="Manually rotate Team 1 positions"
+              title="Rotate Team 1 Lineup"
             >
               🔄 Rot T1
             </button>
@@ -2006,89 +2745,224 @@ export default function VolleyballScoring({
                 saveStateToDB(sets, undefined, undefined, servingTeam, timeoutsP1, timeoutsP2, undefined, statsP1, statsP2, rotationP1, nextRot2);
               }}
               style={{
-                background: 'rgba(255, 255, 255, 0.06)',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
+                background: 'rgba(255, 255, 255, 0.08)',
+                border: '1px solid rgba(255, 255, 255, 0.15)',
                 color: '#E2E8F0',
-                borderRadius: '8px',
-                padding: '6px 10px',
-                fontSize: '11px',
-                fontWeight: '600',
+                borderRadius: '6px',
+                padding: '3px 8px',
+                fontSize: '10px',
+                fontWeight: '700',
                 cursor: 'pointer',
               }}
-              title="Manually rotate Team 2 positions"
+              title="Rotate Team 2 Lineup"
             >
               🔄 Rot T2
             </button>
+            {/* Quick Timeout Call Buttons in Fullscreen Bar */}
+            <button
+              disabled={isPaused || (!sidesSwapped ? timeoutsP1 >= maxTimeouts : timeoutsP2 >= maxTimeouts) || !matchStarted || isMatchComplete}
+              onClick={() => handleCallTimeout(!sidesSwapped ? 'player1' : 'player2')}
+              style={{
+                background: (!sidesSwapped ? timeoutsP1 >= maxTimeouts : timeoutsP2 >= maxTimeouts) ? 'rgba(255, 255, 255, 0.05)' : 'rgba(239, 68, 68, 0.25)',
+                border: '1px solid rgba(239, 68, 68, 0.5)',
+                color: '#FCA5A5',
+                borderRadius: '6px',
+                padding: '3px 8px',
+                fontSize: '10px',
+                fontWeight: '700',
+                cursor: (!sidesSwapped ? timeoutsP1 >= maxTimeouts : timeoutsP2 >= maxTimeouts) ? 'not-allowed' : 'pointer',
+              }}
+              title={`Call Timeout for ${!sidesSwapped ? match.player1_name : match.player2_name}`}
+            >
+              ⏱ TO {!sidesSwapped ? 'L' : 'R'} ({(!sidesSwapped ? timeoutsP1 : timeoutsP2)}/{maxTimeouts})
+            </button>
+            <button
+              disabled={isPaused || (!sidesSwapped ? timeoutsP2 >= maxTimeouts : timeoutsP1 >= maxTimeouts) || !matchStarted || isMatchComplete}
+              onClick={() => handleCallTimeout(!sidesSwapped ? 'player2' : 'player1')}
+              style={{
+                background: (!sidesSwapped ? timeoutsP2 >= maxTimeouts : timeoutsP1 >= maxTimeouts) ? 'rgba(255, 255, 255, 0.05)' : 'rgba(239, 68, 68, 0.25)',
+                border: '1px solid rgba(239, 68, 68, 0.5)',
+                color: '#FCA5A5',
+                borderRadius: '6px',
+                padding: '3px 8px',
+                fontSize: '10px',
+                fontWeight: '700',
+                cursor: (!sidesSwapped ? timeoutsP2 >= maxTimeouts : timeoutsP1 >= maxTimeouts) ? 'not-allowed' : 'pointer',
+              }}
+              title={`Call Timeout for ${!sidesSwapped ? match.player2_name : match.player1_name}`}
+            >
+              ⏱ TO {!sidesSwapped ? 'R' : 'L'} ({(!sidesSwapped ? timeoutsP2 : timeoutsP1)}/{maxTimeouts})
+            </button>
+            <button
+              onClick={() => setShowConfigModal(true)}
+              style={{
+                background: 'rgba(59, 130, 246, 0.2)',
+                border: '1px solid rgba(59, 130, 246, 0.4)',
+                color: '#93C5FD',
+                borderRadius: '6px',
+                padding: '3px 8px',
+                fontSize: '10px',
+                fontWeight: '700',
+                cursor: 'pointer',
+              }}
+              title="Configure Timeouts and Set Points"
+            >
+              ⚙️ Timeouts
+            </button>
+            <button
+              onClick={() => setShowStatsModal(true)}
+              style={{
+                background: 'rgba(147, 51, 234, 0.2)',
+                border: '1px solid rgba(147, 51, 234, 0.4)',
+                color: '#C084FC',
+                borderRadius: '6px',
+                padding: '3px 8px',
+                fontSize: '10px',
+                fontWeight: '700',
+                cursor: 'pointer',
+              }}
+            >
+              📊 Stats
+            </button>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#94A3B8', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={soundEnabled}
+                onChange={(e) => setSoundEnabled(e.target.checked)}
+              />
+              🔊
+            </label>
+          </div>
+
+          {/* Right: Conclude Match */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            {!matchStarted && (
+              <button
+                onClick={() => {
+                  setMatchStarted(true);
+                  saveStateToDB(sets, 'running');
+                }}
+                style={{
+                  background: '#10B981',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  borderRadius: '6px',
+                  padding: '4px 12px',
+                  fontSize: '11px',
+                  fontWeight: '800',
+                  cursor: 'pointer',
+                }}
+              >
+                ▶ Start Match
+              </button>
+            )}
+            <button
+              onClick={() => setShowEndMatchModal(true)}
+              style={{
+                background: isMatchComplete ? '#3B82F6' : 'rgba(239, 68, 68, 0.25)',
+                border: isMatchComplete ? 'none' : '1px solid rgba(239, 68, 68, 0.5)',
+                color: isMatchComplete ? '#FFFFFF' : '#FCA5A5',
+                borderRadius: '6px',
+                padding: '4px 12px',
+                fontSize: '11px',
+                fontWeight: '800',
+                cursor: 'pointer',
+              }}
+            >
+              {isMatchComplete ? '🏆 Complete' : '🏁 Conclude'}
+            </button>
+          </div>
+        </div>
+      ) : (
+        /* Standard Bottom Controls Bar for Desktop / Non-fullscreen */
+        <div
+          className="vb-bottom-bar"
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginTop: '16px',
+            paddingTop: '12px',
+            borderTop: '1px solid rgba(255,255,255,0.08)',
+          }}
+        >
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
             <button
               onClick={() => setServingTeam(prev => (prev === 'player1' ? 'player2' : 'player1'))}
               style={{
-                background: 'rgba(255, 255, 255, 0.06)',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
+                background: 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.1)',
                 color: '#E2E8F0',
                 borderRadius: '8px',
-                padding: '6px 12px',
+                padding: '8px 14px',
                 fontSize: '12px',
                 fontWeight: '600',
                 cursor: 'pointer',
               }}
             >
-              ⇄ Change Serve
+              ⇄ Switch Server
             </button>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#94A3B8' }}>
+              <input
+                type="checkbox"
+                checked={soundEnabled}
+                onChange={(e) => setSoundEnabled(e.target.checked)}
+              />
+              Sound
+            </label>
           </div>
-        </div>
-      </div>
 
+          <div style={{ display: 'flex', gap: '10px' }}>
+            {!matchStarted && (
+              <button
+                onClick={() => {
+                  setMatchStarted(true);
+                  saveStateToDB(sets, 'running');
+                }}
+                style={{
+                  background: '#10B981',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  borderRadius: '8px',
+                  padding: '8px 20px',
+                  fontSize: '13px',
+                  fontWeight: '700',
+                  cursor: 'pointer',
+                }}
+              >
+                ▶ Start Match
+              </button>
+            )}
 
-      {/* Bottom Controls Bar */}
-      <div
-        className="vb-bottom-bar"
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginTop: '16px',
-          paddingTop: '12px',
-          borderTop: '1px solid rgba(255,255,255,0.08)',
-        }}
-      >
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-          <button
-            onClick={() => setServingTeam(prev => (prev === 'player1' ? 'player2' : 'player1'))}
-            style={{
-              background: 'rgba(255,255,255,0.06)',
-              border: '1px solid rgba(255,255,255,0.1)',
-              color: '#E2E8F0',
-              borderRadius: '8px',
-              padding: '8px 14px',
-              fontSize: '12px',
-              fontWeight: '600',
-              cursor: 'pointer',
-            }}
-          >
-            ⇄ Switch Server
-          </button>
+            {matchStarted && !isMatchComplete && (
+              <button
+                onClick={() => {
+                  const nextPaused = !isPaused;
+                  setIsPaused(nextPaused);
+                  saveStateToDB(sets, nextPaused ? 'paused' : 'running', undefined, undefined, undefined, undefined, matchElapsed);
+                }}
+                style={{
+                  background: isPaused ? '#10B981' : '#F59E0B',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  borderRadius: '8px',
+                  padding: '8px 16px',
+                  fontSize: '13px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                }}
+              >
+                {isPaused ? '▶ Resume' : '⏸ Pause'}
+              </button>
+            )}
 
-          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#94A3B8' }}>
-            <input
-              type="checkbox"
-              checked={soundEnabled}
-              onChange={(e) => setSoundEnabled(e.target.checked)}
-            />
-            Sound
-          </label>
-        </div>
-
-        <div style={{ display: 'flex', gap: '10px' }}>
-          {!matchStarted && (
             <button
-              onClick={() => {
-                setMatchStarted(true);
-                saveStateToDB(sets, 'running');
-              }}
+              onClick={() => setShowEndMatchModal(true)}
               style={{
-                background: '#10B981',
-                color: '#FFFFFF',
-                border: 'none',
+                background: isMatchComplete ? '#3B82F6' : 'rgba(239, 68, 68, 0.2)',
+                border: isMatchComplete ? 'none' : '1px solid rgba(239, 68, 68, 0.4)',
+                color: isMatchComplete ? '#FFFFFF' : '#FCA5A5',
                 borderRadius: '8px',
                 padding: '8px 20px',
                 fontSize: '13px',
@@ -2096,49 +2970,11 @@ export default function VolleyballScoring({
                 cursor: 'pointer',
               }}
             >
-              ▶ Start Match
+              {isMatchComplete ? '🏆 Complete Match' : 'Conclude Match'}
             </button>
-          )}
-
-          {matchStarted && !isMatchComplete && (
-            <button
-              onClick={() => {
-                const nextPaused = !isPaused;
-                setIsPaused(nextPaused);
-                saveStateToDB(sets, nextPaused ? 'paused' : 'running', undefined, undefined, undefined, undefined, matchElapsed);
-              }}
-              style={{
-                background: isPaused ? '#10B981' : '#F59E0B',
-                color: '#FFFFFF',
-                border: 'none',
-                borderRadius: '8px',
-                padding: '8px 16px',
-                fontSize: '13px',
-                fontWeight: '600',
-                cursor: 'pointer',
-              }}
-            >
-              {isPaused ? '▶ Resume' : '⏸ Pause'}
-            </button>
-          )}
-
-          <button
-            onClick={() => setShowEndMatchModal(true)}
-            style={{
-              background: isMatchComplete ? '#3B82F6' : 'rgba(239, 68, 68, 0.2)',
-              border: isMatchComplete ? 'none' : '1px solid rgba(239, 68, 68, 0.4)',
-              color: isMatchComplete ? '#FFFFFF' : '#FCA5A5',
-              borderRadius: '8px',
-              padding: '8px 20px',
-              fontSize: '13px',
-              fontWeight: '700',
-              cursor: 'pointer',
-            }}
-          >
-            {isMatchComplete ? '🏆 Complete Match' : 'Conclude Match'}
-          </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Format Configuration Modal */}
       {showConfigModal && (
@@ -2228,8 +3064,52 @@ export default function VolleyballScoring({
               </div>
             </div>
 
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '16px' }}>
+              <div>
+                <label style={{ fontSize: '12px', color: '#94A3B8', display: 'block', marginBottom: '6px' }}>
+                  Max Timeouts (per team)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="5"
+                  value={maxTimeouts}
+                  onChange={(e) => setMaxTimeouts(Math.max(1, parseInt(e.target.value) || 2))}
+                  style={{
+                    width: '100%',
+                    background: '#1E293B',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    color: '#F8FAFC',
+                    borderRadius: '8px',
+                    padding: '8px 12px',
+                  }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '12px', color: '#94A3B8', display: 'block', marginBottom: '6px' }}>
+                  Timeout Scope
+                </label>
+                <select
+                  value={timeoutScope}
+                  onChange={(e) => setTimeoutScope(e.target.value as 'set' | 'match')}
+                  style={{
+                    width: '100%',
+                    background: '#1E293B',
+                    border: '1px solid rgba(255,255,255,0.1)',
+                    color: '#F8FAFC',
+                    borderRadius: '8px',
+                    padding: '8px 12px',
+                  }}
+                >
+                  <option value="set">Per Set (Default 2)</option>
+                  <option value="match">Per Entire Match</option>
+                </select>
+              </div>
+            </div>
+
             <div style={{ fontSize: '11px', color: '#64748B', marginBottom: '16px' }}>
-              Note: Volleyball sets must be won by at least 2 points with no maximum ceiling cap.
+              Note: Volleyball sets must be won by at least 2 points with no maximum ceiling cap. Each team receives {maxTimeouts} timeouts {timeoutScope === 'set' ? 'per set' : 'per match'}.
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
@@ -2249,7 +3129,21 @@ export default function VolleyballScoring({
               <button
                 onClick={() => {
                   setShowConfigModal(false);
-                  saveStateToDB(sets);
+                  const targetCount = matchFormat === 'best_of_5' ? 5 : 3;
+                  let updatedSets = [...sets];
+                  if (updatedSets.length < targetCount) {
+                    for (let i = updatedSets.length + 1; i <= targetCount; i++) {
+                      updatedSets.push({
+                        set_number: i,
+                        player1_score: 0,
+                        player2_score: 0,
+                        is_complete: false,
+                        winner_id: undefined,
+                      });
+                    }
+                    setSets(updatedSets);
+                  }
+                  saveStateToDB(updatedSets);
                 }}
                 style={{
                   background: '#3B82F6',
@@ -2545,6 +3439,381 @@ export default function VolleyballScoring({
               >
                 Close
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Point Attribution Sheet / Modal in Fullscreen Mode */}
+      {showAttributionSheet && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.75)',
+            backdropFilter: 'blur(6px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 10000,
+            padding: '16px',
+          }}
+          onClick={() => setShowAttributionSheet(false)}
+        >
+          <div
+            style={{
+              background: '#0F172A',
+              border: '1px solid rgba(255,255,255,0.15)',
+              borderRadius: '16px',
+              padding: '20px',
+              width: '95%',
+              maxWidth: '680px',
+              maxHeight: '90vh',
+              overflowY: 'auto',
+              boxShadow: '0 20px 50px rgba(0,0,0,0.8)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: '20px' }}>⚡</span>
+                <h3 style={{ fontSize: '16px', fontWeight: '800', margin: 0, color: '#F8FAFC' }}>
+                  Award Point with Reason
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowAttributionSheet(false)}
+                style={{
+                  background: 'rgba(255,255,255,0.1)',
+                  border: 'none',
+                  color: '#94A3B8',
+                  borderRadius: '6px',
+                  padding: '4px 8px',
+                  cursor: 'pointer',
+                  fontWeight: 700,
+                  fontSize: '12px',
+                }}
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+              {/* Team 1 Panel */}
+              <div
+                style={{
+                  background: 'rgba(30, 41, 59, 0.7)',
+                  border: '1px solid rgba(59, 130, 246, 0.4)',
+                  borderRadius: '12px',
+                  padding: '12px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#93C5FD', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>🔵 {match.player1_name}</span>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player1', 'quick');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: '#2563EB',
+                      border: 'none',
+                      color: '#FFF',
+                      padding: '3px 8px',
+                      borderRadius: '4px',
+                      fontSize: '10px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    +1 Quick
+                  </button>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player1', 'attack');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(37, 99, 235, 0.2)',
+                      border: '1px solid rgba(37, 99, 235, 0.4)',
+                      color: '#BFDBFE',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    💥 Spike / Attack Kill
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player1', 'block');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(37, 99, 235, 0.2)',
+                      border: '1px solid rgba(37, 99, 235, 0.4)',
+                      color: '#BFDBFE',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    🛡️ Stuff Block Kill
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player1', 'ace');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(37, 99, 235, 0.2)',
+                      border: '1px solid rgba(37, 99, 235, 0.4)',
+                      color: '#BFDBFE',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    ⚡ Service Ace
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player1', 'opp_attack_out');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(239, 68, 68, 0.15)',
+                      border: '1px solid rgba(239, 68, 68, 0.3)',
+                      color: '#FCA5A5',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    🚫 Opp Hit Out / Wide
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player1', 'opp_net_fault');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(239, 68, 68, 0.15)',
+                      border: '1px solid rgba(239, 68, 68, 0.3)',
+                      color: '#FCA5A5',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    ⚠️ Opp Net Touch / Fault
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player1', 'opp_service_err');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(239, 68, 68, 0.15)',
+                      border: '1px solid rgba(239, 68, 68, 0.3)',
+                      color: '#FCA5A5',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    ❌ Opp Serve In Net/Out
+                  </button>
+                </div>
+              </div>
+
+              {/* Team 2 Panel */}
+              <div
+                style={{
+                  background: 'rgba(30, 41, 59, 0.7)',
+                  border: '1px solid rgba(16, 185, 129, 0.4)',
+                  borderRadius: '12px',
+                  padding: '12px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#6EE7B7', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span>🟢 {match.player2_name}</span>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player2', 'quick');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: '#10B981',
+                      border: 'none',
+                      color: '#FFF',
+                      padding: '3px 8px',
+                      borderRadius: '4px',
+                      fontSize: '10px',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    +1 Quick
+                  </button>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player2', 'attack');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(16, 185, 129, 0.2)',
+                      border: '1px solid rgba(16, 185, 129, 0.4)',
+                      color: '#A7F3D0',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    💥 Spike / Attack Kill
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player2', 'block');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(16, 185, 129, 0.2)',
+                      border: '1px solid rgba(16, 185, 129, 0.4)',
+                      color: '#A7F3D0',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    🛡️ Stuff Block Kill
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player2', 'ace');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(16, 185, 129, 0.2)',
+                      border: '1px solid rgba(16, 185, 129, 0.4)',
+                      color: '#A7F3D0',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    ⚡ Service Ace
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player2', 'opp_attack_out');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(239, 68, 68, 0.15)',
+                      border: '1px solid rgba(239, 68, 68, 0.3)',
+                      color: '#FCA5A5',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    🚫 Opp Hit Out / Wide
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player2', 'opp_net_fault');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(239, 68, 68, 0.15)',
+                      border: '1px solid rgba(239, 68, 68, 0.3)',
+                      color: '#FCA5A5',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    ⚠️ Opp Net Touch / Fault
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleAddPoint('player2', 'opp_service_err');
+                      setShowAttributionSheet(false);
+                    }}
+                    disabled={!matchStarted || isMatchComplete || isPaused || currentSet.is_complete}
+                    style={{
+                      background: 'rgba(239, 68, 68, 0.15)',
+                      border: '1px solid rgba(239, 68, 68, 0.3)',
+                      color: '#FCA5A5',
+                      padding: '8px 10px',
+                      borderRadius: '6px',
+                      fontSize: '11px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                    }}
+                  >
+                    ❌ Opp Serve In Net/Out
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

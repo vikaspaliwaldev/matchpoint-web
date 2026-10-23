@@ -25,6 +25,7 @@ import java.util.List;
 public class SecurityConfig {
 
     private final JwtFilter jwtFilter;
+    private final AuditLoggingFilter auditLoggingFilter;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -34,11 +35,15 @@ public class SecurityConfig {
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(org.springframework.http.HttpMethod.OPTIONS, "/**").permitAll()
-                        .requestMatchers("/api/v1/auth/**", "/api/v1/public/**").permitAll()
+                        .requestMatchers("/api/v1/auth/**", "/api/v1/public/**", "/api/v1/webhooks/**", "/error").permitAll()
                         .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/**").permitAll()
+                        .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/v1/matches", "/api/v1/matches/**", "/api/v1/polls/match/*/vote", "/api/v1/matches/viewers", "/api/v1/audit-logs").permitAll()
+                        .requestMatchers(org.springframework.http.HttpMethod.PUT, "/api/v1/matches/**").permitAll()
+                        .requestMatchers(org.springframework.http.HttpMethod.DELETE, "/api/v1/matches/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(auditLoggingFilter, UsernamePasswordAuthenticationFilter.class)
                 .build();
     }
 

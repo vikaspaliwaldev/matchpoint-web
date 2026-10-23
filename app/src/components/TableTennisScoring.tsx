@@ -4,8 +4,19 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Match, TournamentEvent, Tournament, MatchSet } from '@/types';
 import { updateMatchScore, logAction } from '@/lib/supabase-service';
 import { useAuth } from '@/lib/auth-context';
-import { isTableTennisSetComplete, getTableTennisServer } from '@/lib/sports-rules';
+import {
+  isTableTennisSetComplete,
+  getTableTennisServer,
+  TableTennisMetadata,
+  initialTableTennisMetadata,
+  TableTennisPointType,
+  TableTennisPointStats,
+} from '@/lib/sports-rules';
 import { IconPlay, IconPause, IconUndo, IconCheck, IconArrowLeft, IconTrophy } from '@/components/icons';
+import {
+  saveOfflineScorePayload,
+  flushAllOfflineScores,
+} from '@/lib/offline-scoring';
 
 interface TableTennisScoringProps {
   match: Match;
@@ -62,14 +73,17 @@ export default function TableTennisScoring({
     };
   }, []);
   
+  // Existing metadata
+  const existingMeta = (match.sport_metadata as TableTennisMetadata) || initialTableTennisMetadata;
+
   // Scoring rules configuration
   const setsToWin = 3; // Best of 5
   
   // Game states
-  const [matchStarted, setMatchStarted] = useState(match.status === 'running');
-  const [isPaused, setIsPaused] = useState(false);
-  const [matchElapsed, setMatchElapsed] = useState(0);
-  const [totalPausedTime, setTotalPausedTime] = useState(0);
+  const [matchStarted, setMatchStarted] = useState(match.status === 'running' || match.status === 'completed');
+  const [isPaused, setIsPaused] = useState(match.status === 'paused');
+  const [matchElapsed, setMatchElapsed] = useState(match.duration_seconds || 0);
+  const [totalPausedTime, setTotalPausedTime] = useState(existingMeta.total_paused_seconds || 0);
   const [pauseElapsed, setPauseElapsed] = useState(0);
   const [declareWinnerOpen, setDeclareWinnerOpen] = useState(false);
   const [earlyConcludeReason, setEarlyConcludeReason] = useState<string>('Retirement / Medical Injury');
@@ -78,6 +92,52 @@ export default function TableTennisScoring({
     left: 'player1',
     right: 'player2',
   });
+
+  // Timeouts Configuration (Default 2, configurable per set or match)
+  const [maxTimeouts, setMaxTimeouts] = useState<number>(existingMeta.max_timeouts ?? 2);
+  const [timeoutScope, setTimeoutScope] = useState<'set' | 'match'>(existingMeta.timeout_scope ?? 'set');
+  const [timeoutsP1, setTimeoutsP1] = useState<number>(existingMeta.timeouts_p1 ?? 0);
+  const [timeoutsP2, setTimeoutsP2] = useState<number>(existingMeta.timeouts_p2 ?? 0);
+
+  // Statistics
+  const [statsP1, setStatsP1] = useState<TableTennisPointStats>(
+    existingMeta.stats_p1 || { forehand_winners: 0, backhand_winners: 0, service_aces: 0, opponent_errors: 0 }
+  );
+  const [statsP2, setStatsP2] = useState<TableTennisPointStats>(
+    existingMeta.stats_p2 || { forehand_winners: 0, backhand_winners: 0, service_aces: 0, opponent_errors: 0 }
+  );
+  const [showStatsModal, setShowStatsModal] = useState(false);
+  const [showAttributionSheet, setShowAttributionSheet] = useState(false);
+  const [showConfigModal, setShowConfigModal] = useState(false);
+
+  // Offline / Network Resilience
+  const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'offline' | 'saved_locally'>('idle');
+
+  // Auto sync on online reconnect
+  useEffect(() => {
+    const handleOnline = async () => {
+      setIsOnline(true);
+      setSyncStatus('syncing');
+      try {
+        await flushAllOfflineScores();
+        setSyncStatus('idle');
+      } catch {
+        setSyncStatus('saved_locally');
+      }
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      setSyncStatus('offline');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   const getIndividualPlayers = (name: string): string[] => {
     if (!name) return ['TBD'];
@@ -113,6 +173,15 @@ export default function TableTennisScoring({
   const pauseTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [sets, setSets] = useState<MatchSet[]>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const stored = localStorage.getItem(`matchpoint_offline_score_${match.id}`);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed.sets) && parsed.sets.length > 0) return parsed.sets;
+        }
+      } catch {}
+    }
     if (match.sets && match.sets.length > 0) return match.sets.map(s => ({ ...s }));
     return [{ set_number: 1, player1_score: 0, player2_score: 0, is_complete: false }];
   });
@@ -124,13 +193,19 @@ export default function TableTennisScoring({
     return 0;
   });
 
-  const [initialServer, setInitialServer] = useState<'player1' | 'player2'>('player1');
+  const [initialServer, setInitialServer] = useState<'player1' | 'player2'>(existingMeta.initial_server || 'player1');
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [vibrateEnabled, setVibrateEnabled] = useState(true);
   const [selectedCourt, setSelectedCourt] = useState(match.court || 'Table 1');
   
   // Match history tracking for Undo
-  const [history, setHistory] = useState<MatchSet[][]>([]);
+  const [history, setHistory] = useState<{
+    sets: MatchSet[];
+    statsP1: TableTennisPointStats;
+    statsP2: TableTennisPointStats;
+    timeoutsP1: number;
+    timeoutsP2: number;
+  }[]>([]);
 
   // Derived sets won
   const p1SetsWon = sets.filter(s => s.is_complete && s.winner_id === match.player1_id).length;
@@ -190,65 +265,150 @@ export default function TableTennisScoring({
   }, [matchStarted, isPaused, isMatchComplete]);
 
   useEffect(() => {
-    if (isPaused) {
-      setPauseElapsed(0);
-      pauseTimerRef.current = setInterval(() => {
+    let interval: NodeJS.Timeout | null = null;
+    if (isPaused && !isMatchComplete) {
+      interval = setInterval(() => {
         setPauseElapsed(prev => prev + 1);
       }, 1000);
     } else {
-      if (pauseTimerRef.current) {
-        clearInterval(pauseTimerRef.current);
-        setTotalPausedTime(prev => prev + pauseElapsed);
-        setPauseElapsed(0);
-      }
+      setPauseElapsed(0);
     }
     return () => {
-      if (pauseTimerRef.current) clearInterval(pauseTimerRef.current);
+      if (interval) clearInterval(interval);
     };
-  }, [isPaused, pauseElapsed]);
+  }, [isPaused, isMatchComplete]);
 
-  // Save changes to database
+  // Timeout handler
+  const handleCallTimeout = (player: 'player1' | 'player2') => {
+    if (player === 'player1' && timeoutsP1 < maxTimeouts) {
+      const next = timeoutsP1 + 1;
+      setTimeoutsP1(next);
+      saveStateToDB(sets, undefined, undefined, undefined, statsP1, statsP2, next, timeoutsP2);
+      playBeep(520, 0.15);
+    } else if (player === 'player2' && timeoutsP2 < maxTimeouts) {
+      const next = timeoutsP2 + 1;
+      setTimeoutsP2(next);
+      saveStateToDB(sets, undefined, undefined, undefined, statsP1, statsP2, timeoutsP1, next);
+      playBeep(520, 0.15);
+    }
+  };
+
+  // Save changes to database and offline cache
   const saveStateToDB = async (
     updatedSets: MatchSet[],
     overrideStatus?: Match['status'],
     overrideWinnerId?: string | null,
-    earlyReason?: string
+    earlyReason?: string,
+    overrideStatsP1?: TableTennisPointStats,
+    overrideStatsP2?: TableTennisPointStats,
+    overrideTimeoutsP1?: number,
+    overrideTimeoutsP2?: number
   ) => {
-    const finalStatus = overrideStatus || (overrideWinnerId || p1SetsWon >= setsToWin || p2SetsWon >= setsToWin ? 'completed' : 'running');
+    const finalStatus = overrideStatus || (overrideWinnerId || p1SetsWon >= setsToWin || p2SetsWon >= setsToWin ? 'completed' : (isPaused ? 'paused' : 'running'));
     const finalWinner = overrideWinnerId || (p1SetsWon >= setsToWin ? match.player1_id : (p2SetsWon >= setsToWin ? match.player2_id : null));
+    const effectiveStatsP1 = overrideStatsP1 || statsP1;
+    const effectiveStatsP2 = overrideStatsP2 || statsP2;
+    const effectiveTimeoutsP1 = overrideTimeoutsP1 !== undefined ? overrideTimeoutsP1 : timeoutsP1;
+    const effectiveTimeoutsP2 = overrideTimeoutsP2 !== undefined ? overrideTimeoutsP2 : timeoutsP2;
+
+    const metadata: TableTennisMetadata = {
+      initial_server: initialServer,
+      serving_team: currentServer,
+      scoring_format: scoringFormat,
+      timeouts_p1: effectiveTimeoutsP1,
+      timeouts_p2: effectiveTimeoutsP2,
+      max_timeouts: maxTimeouts,
+      timeout_scope: timeoutScope,
+      stats_p1: effectiveStatsP1,
+      stats_p2: effectiveStatsP2,
+      total_paused_seconds: totalPausedTime + pauseElapsed,
+      ...(earlyReason ? { early_conclude_reason: earlyReason } : {})
+    };
+
+    const actualStartTime = overrideStatus === 'running' && !match.actual_start_time ? new Date().toISOString() : match.actual_start_time;
+    const actualEndTime = finalStatus === 'completed' ? new Date().toISOString() : null;
+
+    // Save offline immediately
+    saveOfflineScorePayload({
+      matchId: match.id,
+      sets: updatedSets,
+      status: finalStatus,
+      winnerId: finalWinner,
+      actualStartTime,
+      actualEndTime,
+      court: selectedCourt,
+      durationSeconds: matchElapsed,
+      sport: 'table_tennis',
+      metadata,
+      savedAt: new Date().toISOString(),
+    });
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setSyncStatus('saved_locally');
+      onScoreUpdated();
+      return;
+    }
 
     try {
+      setSyncStatus('syncing');
       await updateMatchScore(
         match.id,
         updatedSets,
         finalStatus,
         finalWinner,
-        overrideStatus === 'running' ? new Date().toISOString() : match.actual_start_time,
-        finalStatus === 'completed' ? new Date().toISOString() : null,
+        actualStartTime,
+        actualEndTime,
         selectedCourt,
         undefined,
-        null,
+        matchElapsed,
         'table_tennis',
-        { 
-          initial_server: initialServer,
-          ...(earlyReason ? { early_conclude_reason: earlyReason } : {})
-        }
+        metadata
       );
+      setSyncStatus('idle');
       onScoreUpdated();
     } catch (err) {
-      console.error('Failed to sync Table Tennis score:', err);
+      console.warn('Network issue; saved offline locally:', err);
+      setSyncStatus('saved_locally');
+      onScoreUpdated();
     }
   };
 
-  // Add Point
-  const handleAddPoint = (player: 'player1' | 'player2') => {
+  // Add Point with optional reason
+  const handleAddPoint = (player: 'player1' | 'player2', pointType: TableTennisPointType = 'quick') => {
     if (!matchStarted || isMatchComplete || isPaused) return;
 
     // Save history for undo
-    setHistory(prev => [...prev, sets.map(s => ({ ...s }))]);
+    setHistory(prev => [
+      ...prev,
+      {
+        sets: sets.map(s => ({ ...s })),
+        statsP1: { ...statsP1 },
+        statsP2: { ...statsP2 },
+        timeoutsP1,
+        timeoutsP2,
+      }
+    ]);
 
     playBeep(player === 'player1' ? 880 : 980);
     triggerVibrate();
+
+    // Update stats
+    let nextStatsP1 = { ...statsP1 };
+    let nextStatsP2 = { ...statsP2 };
+
+    if (player === 'player1') {
+      if (pointType === 'forehand_winner') nextStatsP1.forehand_winners++;
+      else if (pointType === 'backhand_winner') nextStatsP1.backhand_winners++;
+      else if (pointType === 'service_ace') nextStatsP1.service_aces++;
+      else if (pointType.startsWith('opp_')) nextStatsP1.opponent_errors++;
+    } else {
+      if (pointType === 'forehand_winner') nextStatsP2.forehand_winners++;
+      else if (pointType === 'backhand_winner') nextStatsP2.backhand_winners++;
+      else if (pointType === 'service_ace') nextStatsP2.service_aces++;
+      else if (pointType.startsWith('opp_')) nextStatsP2.opponent_errors++;
+    }
+    setStatsP1(nextStatsP1);
+    setStatsP2(nextStatsP2);
 
     const newSets = sets.map((s, idx) => {
       if (idx !== currentSetIdx) return s;
@@ -295,7 +455,7 @@ export default function TableTennisScoring({
 
     setSets(finalSets);
     setCurrentSetIdx(nextIdx);
-    saveStateToDB(finalSets);
+    saveStateToDB(finalSets, undefined, undefined, undefined, nextStatsP1, nextStatsP2);
   };
 
   // Undo Point
@@ -305,14 +465,18 @@ export default function TableTennisScoring({
     playBeep(400, 0.1);
     triggerVibrate(60);
 
-    const prevSetsState = history[history.length - 1];
+    const last = history[history.length - 1];
     setHistory(prev => prev.slice(0, -1));
-    setSets(prevSetsState);
+    setSets(last.sets);
+    setStatsP1(last.statsP1);
+    setStatsP2(last.statsP2);
+    setTimeoutsP1(last.timeoutsP1);
+    setTimeoutsP2(last.timeoutsP2);
 
     // Find the correct active index
-    const activeIdx = prevSetsState.findIndex(s => !s.is_complete);
-    setCurrentSetIdx(activeIdx === -1 ? prevSetsState.length - 1 : activeIdx);
-    saveStateToDB(prevSetsState);
+    const activeIdx = last.sets.findIndex(s => !s.is_complete);
+    setCurrentSetIdx(activeIdx === -1 ? last.sets.length - 1 : activeIdx);
+    saveStateToDB(last.sets, undefined, undefined, undefined, last.statsP1, last.statsP2, last.timeoutsP1, last.timeoutsP2);
   };
 
   const handleStartMatch = async () => {
@@ -406,14 +570,53 @@ export default function TableTennisScoring({
         {/* Header Info */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-              🏓 Table Tennis · {selectedCourt} {matchStarted && `· ⏱ ${formatTime(matchElapsed - totalPausedTime)}`}
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                🏓 Table Tennis · {selectedCourt} {matchStarted && `· ⏱ ${formatTime(matchElapsed - totalPausedTime)}`}
+              </span>
+              {/* Offline indicator badge */}
+              {!isOnline && (
+                <span style={{ background: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>
+                  OFFLINE
+                </span>
+              )}
+              {syncStatus === 'syncing' && (
+                <span style={{ background: '#3b82f6', color: '#fff', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>
+                  SYNCING...
+                </span>
+              )}
+              {syncStatus === 'saved_locally' && (
+                <span style={{ background: '#eab308', color: '#000', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4 }}>
+                  SAVED TO DEVICE
+                </span>
+              )}
+            </div>
             <h2 style={{ fontSize: 18, fontWeight: 700, marginTop: 2 }}>
               {tournament?.name || 'MatchPoint Tournament'}
             </h2>
           </div>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <button 
+              onClick={() => setShowStatsModal(true)}
+              style={{ padding: '6px 10px', borderRadius: 8, background: 'rgba(147, 51, 234, 0.2)', border: '1px solid rgba(147, 51, 234, 0.4)', color: '#c084fc', fontSize: 12, fontWeight: 700 }}
+              title="Match Statistics"
+            >
+              📊 Stats
+            </button>
+            <button 
+              onClick={() => setShowAttributionSheet(true)}
+              style={{ padding: '6px 10px', borderRadius: 8, background: 'rgba(59, 130, 246, 0.2)', border: '1px solid rgba(59, 130, 246, 0.4)', color: '#93c5fd', fontSize: 12, fontWeight: 700 }}
+              title="Award Point with Reason"
+            >
+              ⚡ Reason ▾
+            </button>
+            <button 
+              onClick={() => setShowConfigModal(true)}
+              style={{ padding: '6px 10px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', fontSize: 12, fontWeight: 700 }}
+              title="Timeout & Rules Configuration"
+            >
+              ⚙️ Timeouts
+            </button>
             <button 
               onClick={() => setSoundEnabled(prev => !prev)}
               style={{ padding: 8, borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', fontSize: 14 }}
@@ -459,12 +662,16 @@ export default function TableTennisScoring({
         }}>
           <div style={{ textAlign: 'right', flex: 1 }}>
             <div style={{ fontSize: 12, fontWeight: 700 }}>{match.player1_name}</div>
-            <div style={{ fontSize: 11, color: '#2563eb', fontWeight: 800 }}>Sets: {p1SetsWon}</div>
+            <div style={{ fontSize: 11, color: '#2563eb', fontWeight: 800 }}>
+              Sets: {p1SetsWon} · Timeouts: {timeoutsP1}/{maxTimeouts}
+            </div>
           </div>
           <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-muted)' }}>vs</div>
           <div style={{ textAlign: 'left', flex: 1 }}>
             <div style={{ fontSize: 12, fontWeight: 700 }}>{match.player2_name}</div>
-            <div style={{ fontSize: 11, color: '#10b981', fontWeight: 800 }}>Sets: {p2SetsWon}</div>
+            <div style={{ fontSize: 11, color: '#10b981', fontWeight: 800 }}>
+              Sets: {p2SetsWon} · Timeouts: {timeoutsP2}/{maxTimeouts}
+            </div>
           </div>
         </div>
 
@@ -572,34 +779,110 @@ export default function TableTennisScoring({
               }} />
 
               {/* Left Side Player Info & Score */}
-              <div style={{
-                position: 'absolute', top: '5%', bottom: '5%', left: '5%', right: '55%',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
-                pointerEvents: 'none', zIndex: 15,
-              }}>
-                <span style={{ fontSize: isDoubles ? 11 : 12, fontWeight: 700, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', textAlign: 'center' }}>{leftPlayerName}</span>
-                <span style={{ fontSize: 'clamp(24px, 10vh, 54px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', margin: '2px 0' }}>{leftScore}</span>
-                {currentServer === courtSides.left && (
-                  <span style={{ fontSize: 9, background: '#ef4444', color: '#fff', padding: '1px 5px', borderRadius: 4, fontWeight: 700, letterSpacing: 0.5 }}>SERVING</span>
-                )}
-              </div>
+              {isDoubles ? (
+                <>
+                  {/* Left Side - Top Quadrant (Left Half-court from left perspective) */}
+                  <div style={{
+                    position: 'absolute', top: '5%', bottom: '50%', left: '4%', right: '54%',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                    pointerEvents: 'none', zIndex: 15,
+                  }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: 'rgba(255,255,255,0.9)', textAlign: 'center', textShadow: '0 2px 6px rgba(0,0,0,0.8)', lineHeight: 1.2 }}>
+                      {courtSides.left === 'player1' ? t1Positions.p2 : t2Positions.p2}
+                    </span>
+                    {/* Top receiver or non-server */}
+                    {currentServer !== courtSides.left && (
+                      <span style={{ fontSize: 8, background: 'rgba(255,255,255,0.2)', color: '#fff', padding: '1px 5px', borderRadius: 4, marginTop: 2, fontWeight: 700 }}>RECEIVER</span>
+                    )}
+                  </div>
+                  {/* Left Side - Bottom Quadrant (Right Half-court / Server's Box) */}
+                  <div style={{
+                    position: 'absolute', top: '50%', bottom: '5%', left: '4%', right: '54%',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                    pointerEvents: 'none', zIndex: 15,
+                  }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: '#ffffff', textAlign: 'center', textShadow: '0 2px 6px rgba(0,0,0,0.8)', lineHeight: 1.2 }}>
+                      {courtSides.left === 'player1' ? t1Positions.p1 : t2Positions.p1}
+                    </span>
+                    {currentServer === courtSides.left && (
+                      <span style={{ fontSize: 8, background: '#ef4444', color: '#fff', padding: '1px 5px', borderRadius: 4, marginTop: 2, fontWeight: 700, letterSpacing: 0.5 }}>SERVING</span>
+                    )}
+                  </div>
+                  {/* Left Side - Center Score Overlay */}
+                  <div style={{
+                    position: 'absolute', top: '50%', left: '26%', transform: 'translate(-50%, -50%)',
+                    pointerEvents: 'none', zIndex: 14, opacity: 0.85
+                  }}>
+                    <span style={{ fontSize: 'clamp(28px, 11vh, 56px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', textShadow: '0 4px 14px rgba(0,0,0,0.7)' }}>{leftScore}</span>
+                  </div>
+                </>
+              ) : (
+                <div style={{
+                  position: 'absolute', top: '5%', bottom: '5%', left: '5%', right: '55%',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                  pointerEvents: 'none', zIndex: 15,
+                }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,0.85)', textTransform: 'uppercase', textAlign: 'center' }}>{leftPlayerName}</span>
+                  <span style={{ fontSize: 'clamp(28px, 12vh, 64px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', margin: '2px 0' }}>{leftScore}</span>
+                  {currentServer === courtSides.left && (
+                    <span style={{ fontSize: 9, background: '#ef4444', color: '#fff', padding: '1px 5px', borderRadius: 4, fontWeight: 700, letterSpacing: 0.5 }}>SERVING</span>
+                  )}
+                </div>
+              )}
 
               {/* Right Side Player Info & Score */}
-              <div style={{
-                position: 'absolute', top: '5%', bottom: '5%', left: '55%', right: '5%',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
-                pointerEvents: 'none', zIndex: 15,
-              }}>
-                <span style={{ fontSize: isDoubles ? 11 : 12, fontWeight: 700, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', textAlign: 'center' }}>{rightPlayerName}</span>
-                <span style={{ fontSize: 'clamp(24px, 10vh, 54px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', margin: '2px 0' }}>{rightScore}</span>
-                {currentServer === courtSides.right && (
-                  <span style={{ fontSize: 9, background: '#10b981', color: '#fff', padding: '1px 5px', borderRadius: 4, fontWeight: 700, letterSpacing: 0.5 }}>SERVING</span>
-                )}
-              </div>
+              {isDoubles ? (
+                <>
+                  {/* Right Side - Top Quadrant (Right Half-court from right perspective / Diagonal Receiver Box) */}
+                  <div style={{
+                    position: 'absolute', top: '5%', bottom: '50%', left: '54%', right: '4%',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                    pointerEvents: 'none', zIndex: 15,
+                  }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: '#ffffff', textAlign: 'center', textShadow: '0 2px 6px rgba(0,0,0,0.8)', lineHeight: 1.2 }}>
+                      {courtSides.right === 'player1' ? t1Positions.p1 : t2Positions.p1}
+                    </span>
+                    {currentServer === courtSides.right ? (
+                      <span style={{ fontSize: 8, background: '#10b981', color: '#fff', padding: '1px 5px', borderRadius: 4, marginTop: 2, fontWeight: 700, letterSpacing: 0.5 }}>SERVING</span>
+                    ) : (
+                      <span style={{ fontSize: 8, background: 'rgba(255,255,255,0.2)', color: '#fff', padding: '1px 5px', borderRadius: 4, marginTop: 2, fontWeight: 700 }}>RECEIVER</span>
+                    )}
+                  </div>
+                  {/* Right Side - Bottom Quadrant (Left Half-court from right perspective) */}
+                  <div style={{
+                    position: 'absolute', top: '50%', bottom: '5%', left: '54%', right: '4%',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                    pointerEvents: 'none', zIndex: 15,
+                  }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: 'rgba(255,255,255,0.9)', textAlign: 'center', textShadow: '0 2px 6px rgba(0,0,0,0.8)', lineHeight: 1.2 }}>
+                      {courtSides.right === 'player1' ? t1Positions.p2 : t2Positions.p2}
+                    </span>
+                  </div>
+                  {/* Right Side - Center Score Overlay */}
+                  <div style={{
+                    position: 'absolute', top: '50%', left: '74%', transform: 'translate(-50%, -50%)',
+                    pointerEvents: 'none', zIndex: 14, opacity: 0.85
+                  }}>
+                    <span style={{ fontSize: 'clamp(28px, 11vh, 56px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', textShadow: '0 4px 14px rgba(0,0,0,0.7)' }}>{rightScore}</span>
+                  </div>
+                </>
+              ) : (
+                <div style={{
+                  position: 'absolute', top: '5%', bottom: '5%', left: '55%', right: '5%',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                  pointerEvents: 'none', zIndex: 15,
+                }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,0.85)', textTransform: 'uppercase', textAlign: 'center' }}>{rightPlayerName}</span>
+                  <span style={{ fontSize: 'clamp(28px, 12vh, 64px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', margin: '2px 0' }}>{rightScore}</span>
+                  {currentServer === courtSides.right && (
+                    <span style={{ fontSize: 9, background: '#10b981', color: '#fff', padding: '1px 5px', borderRadius: 4, fontWeight: 700, letterSpacing: 0.5 }}>SERVING</span>
+                  )}
+                </div>
+              )}
 
               {/* Left touch target */}
               <button
-                onClick={() => handleAddPoint(courtSides.left)}
+                onClick={() => handleAddPoint(courtSides.left, 'quick')}
                 disabled={!matchStarted || isMatchComplete || isPaused}
                 style={{
                   position: 'absolute', top: 0, bottom: 0, left: 0, width: '50%',
@@ -613,14 +896,14 @@ export default function TableTennisScoring({
                 <div style={{
                   position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)',
                   fontSize: 14, fontWeight: 900, color: '#fff',
-                  background: 'rgba(37, 99, 235, 0.85)', padding: '4px 10px', borderRadius: 20,
+                  background: 'rgba(37, 99, 235, 0.85)', padding: '6px 12px', borderRadius: 20,
                   pointerEvents: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-                }}>+1</div>
+                }}>+1 TAP</div>
               </button>
 
               {/* Right touch target */}
               <button
-                onClick={() => handleAddPoint(courtSides.right)}
+                onClick={() => handleAddPoint(courtSides.right, 'quick')}
                 disabled={!matchStarted || isMatchComplete || isPaused}
                 style={{
                   position: 'absolute', top: 0, bottom: 0, right: 0, width: '50%',
@@ -634,9 +917,9 @@ export default function TableTennisScoring({
                 <div style={{
                   position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
                   fontSize: 14, fontWeight: 900, color: '#fff',
-                  background: 'rgba(16, 185, 129, 0.85)', padding: '4px 10px', borderRadius: 20,
+                  background: 'rgba(16, 185, 129, 0.85)', padding: '6px 12px', borderRadius: 20,
                   pointerEvents: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-                }}>+1</div>
+                }}>+1 TAP</div>
               </button>
 
               {/* Pause Overlay inside Court */}
@@ -650,21 +933,93 @@ export default function TableTennisScoring({
                   <div style={{ fontSize: 16, fontWeight: 700, color: '#facc15' }}>
                     ⏸ MATCH PAUSED — Tap Resume to continue
                   </div>
+                  <div style={{ fontSize: 24, fontWeight: 800, fontFamily: 'monospace', color: '#FDE047' }}>
+                    Break Stopwatch: {formatTime(pauseElapsed)}
+                  </div>
                   <button
-                    onClick={() => setIsPaused(false)}
+                    onClick={() => {
+                      setIsPaused(false);
+                      setTotalPausedTime(prev => prev + pauseElapsed);
+                      saveStateToDB(sets, 'running');
+                    }}
                     className="btn btn-primary"
                     style={{
-                      padding: '10px 20px', borderRadius: 'var(--radius-md)', fontWeight: 700,
+                      padding: '10px 24px', borderRadius: 'var(--radius-md)', fontWeight: 700,
                       background: 'linear-gradient(135deg, #eab308 0%, #ca8a04 100%)', color: '#000000', border: 'none'
                     }}
                   >
                     ▶ Resume Match
                   </button>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    Paused: {formatTime(pauseElapsed)}
+                    Total Paused Time: {formatTime(totalPausedTime + pauseElapsed)}
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+
+          {/* Point Breakdown / Quick Attribution Bar */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'rgba(59, 130, 246, 0.08)',
+            border: '1px solid rgba(59, 130, 246, 0.25)',
+            borderRadius: 'var(--radius-md)',
+            padding: '8px 12px',
+            marginTop: 8,
+            gap: 8,
+            flexWrap: 'wrap'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: '#3b82f6', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                ⚡ Point Type:
+              </span>
+              <button
+                onClick={() => setShowAttributionSheet(true)}
+                className="btn btn-primary btn-sm"
+                style={{ fontSize: 11, padding: '4px 10px', height: 28, fontWeight: 700 }}
+              >
+                + Detailed Reason...
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <button
+                onClick={() => handleAddPoint(courtSides.left, 'forehand_winner')}
+                disabled={!matchStarted || isMatchComplete || isPaused}
+                className="btn btn-secondary btn-sm"
+                style={{ fontSize: 11, padding: '4px 8px', height: 28, fontWeight: 700, color: '#2563eb' }}
+                title={`Forehand Winner for ${courtSides.left === 'player1' ? match.player1_name : match.player2_name}`}
+              >
+                🏓 Winner L
+              </button>
+              <button
+                onClick={() => handleAddPoint(courtSides.left, 'service_ace')}
+                disabled={!matchStarted || isMatchComplete || isPaused}
+                className="btn btn-secondary btn-sm"
+                style={{ fontSize: 11, padding: '4px 8px', height: 28, fontWeight: 700, color: '#2563eb' }}
+                title={`Service Ace for ${courtSides.left === 'player1' ? match.player1_name : match.player2_name}`}
+              >
+                ⚡ Ace L
+              </button>
+              <button
+                onClick={() => handleAddPoint(courtSides.right, 'forehand_winner')}
+                disabled={!matchStarted || isMatchComplete || isPaused}
+                className="btn btn-secondary btn-sm"
+                style={{ fontSize: 11, padding: '4px 8px', height: 28, fontWeight: 700, color: '#10b981' }}
+                title={`Forehand Winner for ${courtSides.right === 'player1' ? match.player1_name : match.player2_name}`}
+              >
+                🏓 Winner R
+              </button>
+              <button
+                onClick={() => handleAddPoint(courtSides.right, 'service_ace')}
+                disabled={!matchStarted || isMatchComplete || isPaused}
+                className="btn btn-secondary btn-sm"
+                style={{ fontSize: 11, padding: '4px 8px', height: 28, fontWeight: 700, color: '#10b981' }}
+                title={`Service Ace for ${courtSides.right === 'player1' ? match.player1_name : match.player2_name}`}
+              >
+                ⚡ Ace R
+              </button>
             </div>
           </div>
 
@@ -689,13 +1044,20 @@ export default function TableTennisScoring({
                 flex: 1, height: 48, background: 'var(--bg-secondary)', border: '1px solid var(--border)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 13, fontWeight: 700,
                 opacity: history.length === 0 || isPaused ? 0.5 : 1, cursor: history.length === 0 || isPaused ? 'not-allowed' : 'pointer',
-                minWidth: '120px'
+                minWidth: '110px'
               }}
             >
               <IconUndo size={14} /> Undo Point
             </button>
             <button 
-              onClick={() => setIsPaused(!isPaused)}
+              onClick={() => {
+                const nextPause = !isPaused;
+                setIsPaused(nextPause);
+                if (!nextPause) {
+                  setTotalPausedTime(prev => prev + pauseElapsed);
+                }
+                saveStateToDB(sets, nextPause ? 'paused' : 'running');
+              }}
               className="btn"
               style={{
                 flex: 1, height: 48, 
@@ -703,10 +1065,10 @@ export default function TableTennisScoring({
                 border: isPaused ? 'none' : '1px solid var(--border)',
                 color: isPaused ? '#000000' : 'var(--text-primary)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 13, fontWeight: 700,
-                minWidth: '120px'
+                minWidth: '110px'
               }}
             >
-              {isPaused ? <IconPlay size={14} /> : <IconPause size={14} />} {isPaused ? 'Resume' : 'Pause'}
+              {isPaused ? <IconPlay size={14} /> : <IconPause size={14} />} {isPaused ? `Resume (${formatTime(pauseElapsed)})` : 'Pause'}
             </button>
             <button 
               onClick={handleSwitchSides}
@@ -714,10 +1076,37 @@ export default function TableTennisScoring({
               style={{
                 flex: 1, height: 48, background: 'var(--bg-secondary)', border: '1px solid var(--border)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 13, fontWeight: 700,
-                minWidth: '120px'
+                minWidth: '110px'
               }}
             >
               🔄 Swap Sides
+            </button>
+            {/* Timeouts buttons */}
+            <button
+              onClick={() => handleCallTimeout(courtSides.left)}
+              disabled={isPaused || (courtSides.left === 'player1' ? timeoutsP1 >= maxTimeouts : timeoutsP2 >= maxTimeouts)}
+              className="btn"
+              style={{
+                flex: 1, height: 48, background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 12, fontWeight: 700,
+                minWidth: '110px'
+              }}
+              title="Call Timeout for Left Team"
+            >
+              ⏱ TO L ({courtSides.left === 'player1' ? timeoutsP1 : timeoutsP2}/{maxTimeouts})
+            </button>
+            <button
+              onClick={() => handleCallTimeout(courtSides.right)}
+              disabled={isPaused || (courtSides.right === 'player1' ? timeoutsP1 >= maxTimeouts : timeoutsP2 >= maxTimeouts)}
+              className="btn"
+              style={{
+                flex: 1, height: 48, background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4, fontSize: 12, fontWeight: 700,
+                minWidth: '110px'
+              }}
+              title="Call Timeout for Right Team"
+            >
+              ⏱ TO R ({courtSides.right === 'player1' ? timeoutsP1 : timeoutsP2}/{maxTimeouts})
             </button>
             {isDoubles && (
               <>
@@ -727,7 +1116,7 @@ export default function TableTennisScoring({
                   style={{
                     flex: 1, height: 48, background: 'var(--bg-secondary)', border: '1px solid var(--border)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 13, fontWeight: 700,
-                    minWidth: '120px'
+                    minWidth: '100px'
                   }}
                 >
                   👥 Swap L
@@ -738,26 +1127,26 @@ export default function TableTennisScoring({
                   style={{
                     flex: 1, height: 48, background: 'var(--bg-secondary)', border: '1px solid var(--border)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 13, fontWeight: 700,
-                    minWidth: '120px'
+                    minWidth: '100px'
                   }}
                 >
                   👥 Swap R
                 </button>
               </>
             )}
-            <div className={isScoringFullscreen ? "fullscreen-declare-winner" : ""} style={{ flex: 1, minWidth: '120px' }}>
+            <div className={isScoringFullscreen ? "fullscreen-declare-winner" : ""} style={{ flex: 1, minWidth: '110px' }}>
               <button 
                 onClick={() => setDeclareWinnerOpen(true)}
                 className="btn"
                 style={{
                   width: '100%', height: 48, background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)',
-                color: '#ef4444',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 13, fontWeight: 700,
-                minWidth: '120px'
-              }}
-            >
-              <IconTrophy size={14} /> Winner
-            </button>
+                  color: '#ef4444',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, fontSize: 13, fontWeight: 700,
+                  minWidth: '110px'
+                }}
+              >
+                <IconTrophy size={14} /> Winner
+              </button>
             </div>
           </div>
         </>
@@ -782,6 +1171,129 @@ export default function TableTennisScoring({
               </span>
             )
           ))}
+        </div>
+      )}
+
+      {/* Match Statistics Modal */}
+      {showStatsModal && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000, padding: 16
+        }}>
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-lg)', padding: 24, maxWidth: 460, width: '100%',
+            boxShadow: 'var(--glass-shadow)'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 800, margin: 0 }}>📊 Table Tennis Statistics</h3>
+              <button onClick={() => setShowStatsModal(false)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer' }}>✕</button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, alignItems: 'center', marginBottom: 16 }}>
+              <div style={{ textAlign: 'center', fontWeight: 800, color: '#2563eb', fontSize: 13 }}>{match.player1_name}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1 }}>Metric</div>
+              <div style={{ textAlign: 'center', fontWeight: 800, color: '#10b981', fontSize: 13 }}>{match.player2_name}</div>
+
+              {[
+                { label: 'Forehand Winners', p1: statsP1.forehand_winners, p2: statsP2.forehand_winners },
+                { label: 'Backhand Winners', p1: statsP1.backhand_winners, p2: statsP2.backhand_winners },
+                { label: 'Service Aces', p1: statsP1.service_aces, p2: statsP2.service_aces },
+                { label: 'Opponent Errors', p1: statsP1.opponent_errors, p2: statsP2.opponent_errors },
+                { label: 'Timeouts Used', p1: `${timeoutsP1}/${maxTimeouts}`, p2: `${timeoutsP2}/${maxTimeouts}` },
+              ].map((m, i) => (
+                <React.Fragment key={i}>
+                  <div style={{ background: 'rgba(37,99,235,0.1)', padding: 8, borderRadius: 8, textAlign: 'center', fontWeight: 800, color: '#3b82f6' }}>{m.p1}</div>
+                  <div style={{ textAlign: 'center', fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{m.label}</div>
+                  <div style={{ background: 'rgba(16,185,129,0.1)', padding: 8, borderRadius: 8, textAlign: 'center', fontWeight: 800, color: '#10b981' }}>{m.p2}</div>
+                </React.Fragment>
+              ))}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowStatsModal(false)} className="btn btn-primary" style={{ padding: '8px 20px', fontWeight: 700 }}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Point Attribution Sheet Modal */}
+      {showAttributionSheet && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000, padding: 16
+        }} onClick={() => setShowAttributionSheet(false)}>
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-lg)', padding: 20, maxWidth: 600, width: '100%',
+            boxShadow: 'var(--glass-shadow)'
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 800, margin: 0 }}>⚡ Award Table Tennis Point with Reason</h3>
+              <button onClick={() => setShowAttributionSheet(false)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: 14, cursor: 'pointer' }}>✕</button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              {/* Player 1 Options */}
+              <div style={{ background: 'rgba(37,99,235,0.06)', border: '1px solid rgba(37,99,235,0.2)', borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ fontWeight: 800, color: '#2563eb', fontSize: 13, marginBottom: 4 }}>🔵 {match.player1_name}</div>
+                <button onClick={() => { handleAddPoint('player1', 'forehand_winner'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>🏓 Forehand Winner</button>
+                <button onClick={() => { handleAddPoint('player1', 'backhand_winner'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>🏓 Backhand Winner</button>
+                <button onClick={() => { handleAddPoint('player1', 'service_ace'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>⚡ Service Ace</button>
+                <button onClick={() => { handleAddPoint('player1', 'opp_unforced_error'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>❌ Opp Unforced Error</button>
+                <button onClick={() => { handleAddPoint('player1', 'opp_service_fault'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>⚠️ Opp Service Fault</button>
+              </div>
+
+              {/* Player 2 Options */}
+              <div style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ fontWeight: 800, color: '#10b981', fontSize: 13, marginBottom: 4 }}>🟢 {match.player2_name}</div>
+                <button onClick={() => { handleAddPoint('player2', 'forehand_winner'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>🏓 Forehand Winner</button>
+                <button onClick={() => { handleAddPoint('player2', 'backhand_winner'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>🏓 Backhand Winner</button>
+                <button onClick={() => { handleAddPoint('player2', 'service_ace'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>⚡ Service Ace</button>
+                <button onClick={() => { handleAddPoint('player2', 'opp_unforced_error'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>❌ Opp Unforced Error</button>
+                <button onClick={() => { handleAddPoint('player2', 'opp_service_fault'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>⚠️ Opp Service Fault</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Configuration Modal */}
+      {showConfigModal && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000, padding: 16
+        }}>
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-lg)', padding: 24, maxWidth: 380, width: '100%',
+            boxShadow: 'var(--glass-shadow)'
+          }}>
+            <h3 style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>⚙️ Configure Timeouts</h3>
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Max Timeouts (per team)</label>
+              <input 
+                type="number" min="1" max="5" 
+                value={maxTimeouts} 
+                onChange={e => setMaxTimeouts(Math.max(1, parseInt(e.target.value) || 2))}
+                className="input" style={{ width: '100%' }}
+              />
+            </div>
+            <div style={{ marginBottom: 18 }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Timeout Scope</label>
+              <select 
+                value={timeoutScope} 
+                onChange={e => setTimeoutScope(e.target.value as 'set' | 'match')}
+                className="input" style={{ width: '100%' }}
+              >
+                <option value="set">Per Game / Set (Default 2 per set)</option>
+                <option value="match">Per Entire Match</option>
+              </select>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button onClick={() => setShowConfigModal(false)} className="btn btn-primary" style={{ padding: '8px 16px', fontWeight: 700 }}>Done</button>
+            </div>
+          </div>
         </div>
       )}
 

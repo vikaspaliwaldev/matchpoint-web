@@ -23,9 +23,11 @@ public class AuditLog {
     private String category; // 'tournament', 'event', 'registration', 'match', 'team', 'auth'
 
     @Column(name = "user_id")
+    @com.fasterxml.jackson.annotation.JsonAlias({"userId", "user_id"})
     private String userId;
 
     @Column(name = "user_name", nullable = false)
+    @com.fasterxml.jackson.annotation.JsonAlias({"userName", "user_name"})
     private String userName;
 
     @Column(columnDefinition = "TEXT")

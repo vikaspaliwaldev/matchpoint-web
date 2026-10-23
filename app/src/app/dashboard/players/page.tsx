@@ -51,34 +51,59 @@ export default function PlayersDirectoryPage() {
     loadData();
   }, []);
 
-  const targetSport = directorySportFilter !== 'all' ? directorySportFilter : activeSport;
+  const targetSport = directorySportFilter;
 
   const filteredPlayers = players.filter(p => {
-    const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    const pNameLower = p.name.toLowerCase();
+    const matchesSearch = pNameLower.includes(searchQuery.toLowerCase()) ||
       p.email.toLowerCase().includes(searchQuery.toLowerCase());
     if (!matchesSearch) return false;
 
     if (targetSport === 'all') return true;
 
-    // 1. Check if the player has any match in the target sport
+    // 1. Check if the player has any match in the target sport (direct or by name)
     const hasMatchInSport = matches.some(m => {
-      const isPlayer = m.player1_id === p.id || m.player2_id === p.id;
-      if (!isPlayer) return false;
       const tour = tournaments.find(tour => tour.id === m.tournament_id);
-      return m.sport === targetSport || (tour && tour.sport === targetSport);
+      const mSport = m.sport || tour?.sport || 'badminton';
+      if (mSport !== targetSport) return false;
+
+      const isDirectPlayer = m.player1_id === p.id || m.player2_id === p.id;
+      const isNamePlayer = m.player1_name.toLowerCase().includes(pNameLower) || m.player2_name.toLowerCase().includes(pNameLower);
+      if (isDirectPlayer || isNamePlayer) return true;
+
+      // Cricket metadata check: did this player bat or bowl in this cricket match?
+      if (mSport === 'cricket' && m.sport_metadata) {
+        const meta = m.sport_metadata;
+        const inInn1 = meta.innings_1 && (
+          meta.innings_1.batters?.[p.id] ||
+          meta.innings_1.bowlers?.[p.id] ||
+          Object.values(meta.innings_1.batters || {}).some((b: any) => b.player_name?.toLowerCase().includes(pNameLower)) ||
+          Object.values(meta.innings_1.bowlers || {}).some((bw: any) => bw.player_name?.toLowerCase().includes(pNameLower))
+        );
+        const inInn2 = meta.innings_2 && (
+          meta.innings_2.batters?.[p.id] ||
+          meta.innings_2.bowlers?.[p.id] ||
+          Object.values(meta.innings_2.batters || {}).some((b: any) => b.player_name?.toLowerCase().includes(pNameLower)) ||
+          Object.values(meta.innings_2.bowlers || {}).some((bw: any) => bw.player_name?.toLowerCase().includes(pNameLower))
+        );
+        if (inInn1 || inInn2) return true;
+      }
+      return false;
     });
     if (hasMatchInSport) return true;
 
     // 2. Check if the player belongs to a team registered in a targetSport tournament
     const belongsToTeamInSport = teams.some(t => {
-      if (!t.players.includes(p.id) && !t.players.includes(p.name)) return false;
+      const isMember = t.players?.includes(p.id) ||
+        t.players?.some(pid => pid.toLowerCase() === pNameLower) ||
+        t.roster?.some(r => r.id === p.id || r.name.toLowerCase() === pNameLower);
+      if (!isMember) return false;
       const tour = tournaments.find(tour => tour.id === t.tournament_id);
       return tour && (tour.sport === targetSport || (targetSport === 'volleyball' && tour.id.includes('vpl')));
     });
     if (belongsToTeamInSport) return true;
 
-    // 3. Fallback
-    return targetSport === 'badminton';
+    return false;
   });
 
   // Auto-select first matching player when active sport or list changes
@@ -94,27 +119,66 @@ export default function PlayersDirectoryPage() {
 
   const selectedPlayer = players.find(p => p.id === selectedPlayerId);
 
+  // Helper to check if a match involves the selected player
+  const isPlayerInMatch = (m: Match, pId: string, pName: string) => {
+    const pNameLower = pName.toLowerCase();
+    if (m.player1_id === pId || m.player2_id === pId) return true;
+    if (m.player1_name.toLowerCase().includes(pNameLower) || m.player2_name.toLowerCase().includes(pNameLower)) return true;
+
+    // Check Cricket figures
+    if (m.sport === 'cricket' && m.sport_metadata) {
+      const meta = m.sport_metadata;
+      const inInn1 = meta.innings_1 && (
+        meta.innings_1.batters?.[pId] ||
+        meta.innings_1.bowlers?.[pId] ||
+        Object.values(meta.innings_1.batters || {}).some((b: any) => b.player_name?.toLowerCase().includes(pNameLower)) ||
+        Object.values(meta.innings_1.bowlers || {}).some((bw: any) => bw.player_name?.toLowerCase().includes(pNameLower))
+      );
+      const inInn2 = meta.innings_2 && (
+        meta.innings_2.batters?.[pId] ||
+        meta.innings_2.bowlers?.[pId] ||
+        Object.values(meta.innings_2.batters || {}).some((b: any) => b.player_name?.toLowerCase().includes(pNameLower)) ||
+        Object.values(meta.innings_2.bowlers || {}).some((bw: any) => bw.player_name?.toLowerCase().includes(pNameLower))
+      );
+      if (inInn1 || inInn2) return true;
+    }
+
+    // Check team matches (e.g. Volleyball or Team Cricket)
+    const playerTeams = teams.filter(t =>
+      t.players?.includes(pId) ||
+      t.players?.some(id => id.toLowerCase() === pNameLower) ||
+      t.roster?.some(r => r.id === pId || r.name.toLowerCase() === pNameLower)
+    );
+    if (playerTeams.length > 0) {
+      const teamNames = playerTeams.map(t => t.name.toLowerCase());
+      const teamIds = playerTeams.map(t => t.id);
+      if (teamIds.includes(m.player1_id) || teamIds.includes(m.player2_id)) return true;
+      if (teamNames.some(tn => m.player1_name.toLowerCase().includes(tn) || m.player2_name.toLowerCase().includes(tn))) return true;
+    }
+
+    return false;
+  };
+
   // Calculate statistics for selected player split/filtered by sport
-  const playerMatches = matches.filter(m => {
-    const isPlayer = m.player1_id === selectedPlayerId || m.player2_id === selectedPlayerId;
-    if (!isPlayer) return false;
+  const playerMatches = selectedPlayer ? matches.filter(m => {
+    if (!isPlayerInMatch(m, selectedPlayer.id, selectedPlayer.name)) return false;
     const tour = tournaments.find(t => t.id === m.tournament_id);
     const mSport = m.sport || tour?.sport || 'badminton';
     if (profileSportFilter !== 'all') {
       return mSport === profileSportFilter;
     }
-    return activeSport === 'all' || (tour && tour.sport === activeSport) || m.sport === activeSport;
-  });
+    return true;
+  }) : [];
 
   // Calculate all sports played by selected player
-  const playerSportsPlayed = Array.from(new Set(
+  const playerSportsPlayed = selectedPlayer ? Array.from(new Set(
     matches
-      .filter(m => m.player1_id === selectedPlayerId || m.player2_id === selectedPlayerId)
+      .filter(m => isPlayerInMatch(m, selectedPlayer.id, selectedPlayer.name))
       .map(m => {
         const tour = tournaments.find(t => t.id === m.tournament_id);
         return m.sport || tour?.sport || 'badminton';
       })
-  ));
+  )) : [];
 
   // Matches in descending order (recent first)
   const sortedMatches = [...playerMatches].sort((a, b) => {
@@ -124,7 +188,21 @@ export default function PlayersDirectoryPage() {
   });
 
   const completedMatches = playerMatches.filter(m => m.status === 'completed');
-  const wins = completedMatches.filter(m => m.winner_id === selectedPlayerId).length;
+  const wins = completedMatches.filter(m => {
+    if (!selectedPlayer) return false;
+    if (m.winner_id === selectedPlayer.id) return true;
+    const pNameLower = selectedPlayer.name.toLowerCase();
+    if (m.winner_id && (m.winner_id === m.player1_id ? m.player1_name : m.player2_name).toLowerCase().includes(pNameLower)) return true;
+    // Check if player's team won
+    const playerTeams = teams.filter(t =>
+      t.players?.includes(selectedPlayer.id) ||
+      t.players?.some(id => id.toLowerCase() === pNameLower) ||
+      t.roster?.some(r => r.id === selectedPlayer.id || r.name.toLowerCase() === pNameLower)
+    );
+    const teamIds = playerTeams.map(t => t.id);
+    if (m.winner_id && teamIds.includes(m.winner_id)) return true;
+    return false;
+  }).length;
   const losses = completedMatches.length - wins;
   const winRate = completedMatches.length > 0 ? Math.round((wins / completedMatches.length) * 100) : 0;
 
@@ -168,10 +246,13 @@ export default function PlayersDirectoryPage() {
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             {[
               { id: 'all', label: 'All', icon: '🌍' },
-              { id: 'volleyball', label: 'Volleyball', icon: '🏐' },
+              { id: 'cricket', label: 'Cricket', icon: '🏏' },
               { id: 'badminton', label: 'Badminton', icon: '🏸' },
+              { id: 'tennis', label: 'Tennis', icon: '🎾' },
               { id: 'table_tennis', label: 'Table Tennis', icon: '🏓' },
+              { id: 'volleyball', label: 'Volleyball', icon: '🏐' },
               { id: 'squash', label: 'Squash', icon: '🎾' },
+              { id: 'basketball', label: 'Basketball', icon: '🏀' },
             ].map(s => (
               <button
                 key={s.id}
@@ -370,11 +451,56 @@ export default function PlayersDirectoryPage() {
                 {sortedMatches.map(match => {
                   const tournament = tournaments.find(t => t.id === match.tournament_id);
                   const eventObj = events.find(e => e.id === match.event_id);
-                  const isOpponent = match.player1_id === selectedPlayerId ? match.player2_name : match.player1_name;
+                  const mSport = match.sport || tournament?.sport || 'badminton';
+
+                  const pNameLower = selectedPlayer.name.toLowerCase();
+                  const isPlayerP1 = match.player1_id === selectedPlayer.id || match.player1_name.toLowerCase().includes(pNameLower);
+                  const oppName = isPlayerP1 ? match.player2_name : match.player1_name;
                   
                   let resultState: 'win' | 'loss' | 'pending' = 'pending';
                   if (match.status === 'completed') {
-                    resultState = match.winner_id === selectedPlayerId ? 'win' : 'loss';
+                    if (match.winner_id === selectedPlayer.id) {
+                      resultState = 'win';
+                    } else if (match.winner_id) {
+                      const winnerName = match.winner_id === match.player1_id ? match.player1_name : match.player2_name;
+                      if (winnerName.toLowerCase().includes(pNameLower)) {
+                        resultState = 'win';
+                      } else {
+                        // Check team win
+                        const playerTeams = teams.filter(t =>
+                          t.players?.includes(selectedPlayer.id) ||
+                          t.players?.some(id => id.toLowerCase() === pNameLower) ||
+                          t.roster?.some(r => r.id === selectedPlayer.id || r.name.toLowerCase() === pNameLower)
+                        );
+                        resultState = playerTeams.some(t => t.id === match.winner_id) ? 'win' : 'loss';
+                      }
+                    } else {
+                      resultState = 'loss';
+                    }
+                  }
+
+                  // Cricket Match summary extraction
+                  const cricketMeta = mSport === 'cricket' ? (match.sport_metadata as any) : null;
+                  const inn1 = cricketMeta?.innings_1;
+                  const inn2 = cricketMeta?.innings_2;
+
+                  // Player individual figures in this cricket match
+                  let batterStat: any = null;
+                  let bowlerStat: any = null;
+                  if (cricketMeta) {
+                    [inn1, inn2].filter(Boolean).forEach(inn => {
+                      if (inn.batters?.[selectedPlayer.id]) batterStat = inn.batters[selectedPlayer.id];
+                      else {
+                        const bEntry = Object.values(inn.batters || {}).find((b: any) => b.player_name?.toLowerCase().includes(pNameLower));
+                        if (bEntry) batterStat = bEntry;
+                      }
+
+                      if (inn.bowlers?.[selectedPlayer.id]) bowlerStat = inn.bowlers[selectedPlayer.id];
+                      else {
+                        const bwEntry = Object.values(inn.bowlers || {}).find((bw: any) => bw.player_name?.toLowerCase().includes(pNameLower));
+                        if (bwEntry) bowlerStat = bwEntry;
+                      }
+                    });
                   }
 
                   return (
@@ -384,10 +510,8 @@ export default function PlayersDirectoryPage() {
                       background: 'var(--bg-secondary)',
                       border: '1px solid var(--border)',
                       display: 'flex',
-                      flexWrap: 'wrap',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 16,
+                      flexDirection: 'column',
+                      gap: 12,
                       position: 'relative',
                       overflow: 'hidden'
                     }}>
@@ -401,50 +525,107 @@ export default function PlayersDirectoryPage() {
                         background: resultState === 'win' ? 'var(--score-win)' : resultState === 'loss' ? 'var(--score-loss)' : 'var(--status-open)'
                       }} />
 
-                      <div style={{ paddingLeft: 8 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                          <span style={{ fontWeight: 600, fontSize: 15 }}>
-                            vs {isOpponent}
-                          </span>
-                          <span className={`badge badge-${match.status === 'running' ? 'live' : match.status === 'completed' ? (resultState === 'win' ? 'approved' : 'rejected') : 'open'}`}>
-                            {match.status === 'completed' ? (resultState === 'win' ? 'WIN' : 'LOSS') : match.status}
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <span>{tournament?.name}</span>
-                          <span>·</span>
-                          <span>{eventObj?.event_name}</span>
-                        </div>
-                      </div>
-
-                      {/* Right Side: Sets Score */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-                        {match.sets.length > 0 ? (
-                          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                            {match.sets.map((s, idx) => (
-                              <div key={idx} style={{
-                                padding: '4px 8px',
-                                background: 'var(--bg-elevated)',
-                                borderRadius: 'var(--radius-sm)',
-                                fontSize: 12,
-                                fontFamily: 'var(--font-mono)',
-                                fontWeight: s.is_complete ? 600 : 400
-                              }}>
-                                {match.player1_id === selectedPlayerId ? `${s.player1_score}-${s.player2_score}` : `${s.player2_score}-${s.player1_score}`}
-                              </div>
-                            ))}
+                      <div style={{ paddingLeft: 8, display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                            <span style={{ fontSize: 13, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 4 }}>
+                              {mSport === 'cricket' ? '🏏 Cricket' : mSport === 'volleyball' ? '🏐 Volleyball' : mSport === 'badminton' ? '🏸 Badminton' : mSport === 'tennis' ? '🎾 Tennis' : '🏅 ' + mSport}
+                            </span>
+                            <span style={{ fontWeight: 600, fontSize: 15 }}>
+                              vs {oppName}
+                            </span>
+                            <span className={`badge badge-${match.status === 'running' ? 'live' : match.status === 'completed' ? (resultState === 'win' ? 'approved' : 'rejected') : 'open'}`}>
+                              {match.status === 'completed' ? (resultState === 'win' ? 'WIN' : 'LOSS') : match.status}
+                            </span>
                           </div>
-                        ) : (
-                          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>TBD</span>
-                        )}
+                          <div style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span>{tournament?.name}</span>
+                            {eventObj && (
+                              <>
+                                <span>·</span>
+                                <span>{eventObj.event_name}</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
 
+                        {/* Date and Court */}
                         <div style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'right' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end' }}>
                             <IconClock size={11} />
                             {match.scheduled_time ? new Date(match.scheduled_time).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }) : '—'}
                           </div>
                           {match.court && <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{match.court}</div>}
                         </div>
+                      </div>
+
+                      {/* Score / Performance details */}
+                      <div style={{ paddingLeft: 8, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                        {mSport === 'cricket' && cricketMeta ? (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {/* Inning Totals */}
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, alignItems: 'center' }}>
+                              {inn1 && (
+                                <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+                                  {inn1.batting_team_name}: <span style={{ color: 'var(--accent)' }}>{inn1.total_runs}/{inn1.wickets}</span> <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>({inn1.overs_formatted || '0.0'} ov)</span>
+                                </div>
+                              )}
+                              {inn2 && (
+                                <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+                                  vs {inn2.batting_team_name}: <span style={{ color: 'var(--accent)' }}>{inn2.total_runs}/{inn2.wickets}</span> <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>({inn2.overs_formatted || '0.0'} ov)</span>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Player's individual stats if available */}
+                            {(batterStat || bowlerStat) && (
+                              <div style={{
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                gap: 12,
+                                background: 'var(--bg-elevated)',
+                                padding: '6px 12px',
+                                borderRadius: 'var(--radius-sm)',
+                                fontSize: 12,
+                                marginTop: 4,
+                              }}>
+                                {batterStat && (
+                                  <div style={{ color: 'var(--text-primary)' }}>
+                                    🏏 Batting: <strong>{batterStat.runs}</strong> ({batterStat.balls_faced}b, {batterStat.fours}x4, {batterStat.sixes}x6) — SR: {batterStat.strike_rate}
+                                  </div>
+                                )}
+                                {bowlerStat && (
+                                  <div style={{ color: 'var(--text-primary)' }}>
+                                    🔴 Bowling: <strong>{bowlerStat.wickets}/{bowlerStat.runs_conceded}</strong> in {bowlerStat.overs || '0'} ov — Econ: {bowlerStat.economy}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          /* Racket / Volleyball sets */
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Sets Breakdown:</div>
+                            {match.sets.length > 0 ? (
+                              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                {match.sets.map((s, idx) => (
+                                  <div key={idx} style={{
+                                    padding: '4px 8px',
+                                    background: 'var(--bg-elevated)',
+                                    borderRadius: 'var(--radius-sm)',
+                                    fontSize: 12,
+                                    fontFamily: 'var(--font-mono)',
+                                    fontWeight: s.is_complete ? 600 : 400
+                                  }}>
+                                    {isPlayerP1 ? `${s.player1_score}-${s.player2_score}` : `${s.player2_score}-${s.player1_score}`}
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>TBD</span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                   );

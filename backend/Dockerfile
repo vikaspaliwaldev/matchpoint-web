@@ -20,6 +20,10 @@ WORKDIR /app
 
 # Non-root system account for enhanced execution security
 RUN addgroup -S matchpoint && adduser -S matchpoint -G matchpoint
+
+# Create logs directory and assign write permissions to matchpoint user
+RUN mkdir -p /app/logs && chown -R matchpoint:matchpoint /app/logs
+
 USER matchpoint
 
 # Copy packaged jar from build stage

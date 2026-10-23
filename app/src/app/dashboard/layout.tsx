@@ -359,7 +359,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
                 </Link>
               </div>
             </div>
-          ) : ['cricket', 'basketball'].includes(activeSport) ? (
+          ) : ['basketball'].includes(activeSport) ? (
             <UnimplementedSportPlaceholder sport={activeSport} />
           ) : (
             children

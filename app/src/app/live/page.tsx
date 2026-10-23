@@ -13,9 +13,10 @@ import ShuttlecockLoader from '@/components/ShuttlecockLoader';
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
 import { useSport } from '@/lib/sport-context';
 import SportSelector from '@/components/SportSelector';
-import { formatTennisGameScore, getTableTennisServer } from '@/lib/sports-rules';
+import { formatTennisGameScore, getTableTennisServer, CricketMetadata, calculateCurrentRunRate, calculateRequiredRunRate } from '@/lib/sports-rules';
 import { LiquidGlassCard } from '@/components/kokonutui/liquid-glass-card';
 import { getTeamLogo } from '@/lib/team-logos';
+import CricketMatchModal from '@/components/CricketMatchModal';
 
 interface SearchableTournamentSelectProps {
   selectedId: string;
@@ -193,6 +194,7 @@ export default function PublicLiveScoreboardPage() {
   const [activeChatMatchId, setActiveChatMatchId] = useState<string | null>(null);
   const [sidebarTab, setSidebarTab] = useState<'chat' | 'poll'>('chat');
   const [selectedMediaMatch, setSelectedMediaMatch] = useState<Match | null>(null);
+  const [selectedCricketMatch, setSelectedCricketMatch] = useState<Match | null>(null);
   const [events, setEvents] = useState<TournamentEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [lastSynced, setLastSynced] = useState<Date | null>(null);
@@ -796,130 +798,312 @@ export default function PublicLiveScoreboardPage() {
                       </div>
                     </div>
 
-                    {/* Card Body: Player names and score columns aligned */}
-                    <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 12, flex: 1, minWidth: 0 }}>
-                      
-                      {/* Set Grid Headers: G1, G2, G3 */}
-                      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingRight: 0 }}>
-                        {setsArray.map((_, idx) => (
-                          <span key={idx} style={{ width: 36, textAlign: 'center', fontSize: 10, fontWeight: 700, color: 'var(--text-muted)' }}>
-                            G{idx + 1}
-                          </span>
-                        ))}
-                        {match.sport === 'tennis' && gameInProgress && (
-                          <span style={{ width: 36, textAlign: 'center', fontSize: 10, fontWeight: 700, color: '#eab308' }}>
-                            PTS
-                          </span>
-                        )}
-                      </div>
+                    {/* Card Body: Cricket CricHeroes Style vs Standard Racket Sets */}
+                    {match.sport === 'cricket' ? (
+                      (() => {
+                        const cMeta = match.sport_metadata as CricketMetadata | undefined;
+                        const cInn1 = cMeta?.innings_1;
+                        const cInn2 = cMeta?.innings_2;
+                        const curInn = cMeta?.current_innings === 2 && cInn2 ? cInn2 : cInn1;
+                        const crrVal = curInn ? calculateCurrentRunRate(curInn.total_runs, curInn.balls_bowled) : 0;
+                        const target = cInn2?.target_runs;
+                        const ballsRem = curInn ? Math.max(0, curInn.max_overs * 6 - curInn.balls_bowled) : 0;
+                        const runsReq = target && curInn ? Math.max(0, target - curInn.total_runs) : 0;
+                        const rrrVal = cMeta?.current_innings === 2 && target ? calculateRequiredRunRate(runsReq, ballsRem) : 0;
+                        
+                        const strikerBat = cMeta?.striker_id && curInn?.batters ? curInn.batters[cMeta.striker_id] : null;
+                        const nonStrikerBat = cMeta?.non_striker_id && curInn?.batters ? curInn.batters[cMeta.non_striker_id] : null;
+                        const curBowler = cMeta?.bowler_id && curInn?.bowlers ? curInn.bowlers[cMeta.bowler_id] : null;
+                        const recentBalls = (curInn?.deliveries || []).slice(-6);
 
-                      {/* Player 1 Row */}
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
-                        {renderPlayerName(match.player1_name, isP1Serving, match.sport)}
-                        <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-                          {setsArray.map((_, idx) => {
-                            const setObj = match.sets[idx];
-                            const isCurrentSet = idx === activeSetIdx && !setObj?.is_complete;
-                            const score = setObj ? setObj.player1_score : ' ';
-                            return (
+                        const pRuns = curInn?.deliveries?.slice(-10).reduce((sum, d) => sum + (d.total_runs || 0), 0) ?? 0;
+                        const pBalls = curInn?.deliveries?.slice(-10).length ?? 0;
+
+                        return (
+                          <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12, flex: 1, minWidth: 0 }}>
+                            {/* CricHeroes / Cricbuzz Score summary row */}
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 8 }}>
+                              <div>
+                                <div style={{ fontSize: 11, fontWeight: 700, color: '#ea580c', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                                  {curInn ? curInn.batting_team_name : match.player1_name} {cMeta?.current_innings ? `(Inn ${cMeta.current_innings})` : ''}
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
+                                  <span style={{ fontSize: 28, fontWeight: 900, fontFamily: 'monospace', color: 'var(--text-primary)', lineHeight: 1 }}>
+                                    {curInn ? `${curInn.total_runs}/${curInn.wickets}` : '0/0'}
+                                  </span>
+                                  <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-muted)' }}>
+                                    ({curInn?.overs_formatted || '0.0'} / {curInn?.max_overs || cMeta?.overs_per_innings || 20} ov)
+                                  </span>
+                                </div>
+                                {cInn1 && cMeta?.current_innings === 2 && (
+                                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                                    1st Inn: {cInn1.batting_team_name} {cInn1.total_runs}/{cInn1.wickets} ({cInn1.overs_formatted} ov)
+                                  </div>
+                                )}
+                              </div>
+
+                              <div style={{ textAlign: 'right' }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--accent)' }}>
+                                  CRR: {crrVal.toFixed(2)}
+                                </div>
+                                {cMeta?.current_innings === 2 && target && (
+                                  <div style={{ fontSize: 11, fontWeight: 800, color: '#f59e0b', marginTop: 2 }}>
+                                    Need {runsReq} runs ({ballsRem}b) · RRR: {rrrVal.toFixed(2)}
+                                  </div>
+                                )}
+                                {cMeta?.toss_winner_id && (
+                                  <div style={{ fontSize: 10, color: '#64748b', marginTop: 2, fontStyle: 'italic' }}>
+                                    Toss: {cMeta.toss_winner_id === 'player1' ? match.player1_name : match.player2_name} opt to {cMeta.toss_decision}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Cricbuzz Split View: Batters/Bowlers on left, Key Stats on right */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+                              {/* Left: Active Crease & Bowler */}
+                              <div style={{
+                                background: 'var(--bg-elevated)',
+                                border: '1px solid var(--border)',
+                                borderRadius: 8,
+                                padding: '8px 12px',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 6,
+                                fontSize: 12,
+                              }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <span style={{ fontWeight: 800, color: 'var(--accent)' }}>
+                                      🏏 {cMeta?.striker_name || strikerBat?.player_name || 'Striker'} *
+                                    </span>
+                                    <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 4px', borderRadius: 3, background: 'rgba(37,99,235,0.1)', color: 'var(--accent)' }}>
+                                      {strikerBat?.batting_style || cMeta?.striker_batting_style || 'RHB'}
+                                    </span>
+                                  </div>
+                                  <span style={{ fontFamily: 'monospace', fontWeight: 700 }}>
+                                    {strikerBat?.runs ?? 0} ({strikerBat?.balls_faced ?? 0}b)
+                                  </span>
+                                </div>
+
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                    <span style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>
+                                      {cMeta?.non_striker_name || nonStrikerBat?.player_name || 'Non-Striker'}
+                                    </span>
+                                    <span style={{ fontSize: 9, fontWeight: 700, padding: '1px 4px', borderRadius: 3, background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)' }}>
+                                      {nonStrikerBat?.batting_style || cMeta?.non_striker_batting_style || 'RHB'}
+                                    </span>
+                                  </div>
+                                  <span style={{ fontFamily: 'monospace', color: 'var(--text-muted)' }}>
+                                    {nonStrikerBat?.runs ?? 0} ({nonStrikerBat?.balls_faced ?? 0}b)
+                                  </span>
+                                </div>
+
+                                {curBowler && (
+                                  <div style={{ borderTop: '1px solid var(--border)', paddingTop: 4, display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11 }}>
+                                    <span style={{ color: '#10b981', fontWeight: 700 }}>
+                                      🔴 {cMeta?.bowler_name || curBowler.player_name}
+                                    </span>
+                                    <span style={{ fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
+                                      {curBowler.overs}-{curBowler.maidens}-{curBowler.runs_conceded}-{curBowler.wickets} (Econ {curBowler.economy})
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Right: Cricbuzz Key Stats Box */}
+                              <div style={{
+                                background: 'rgba(255,255,255,0.02)',
+                                border: '1px solid var(--border)',
+                                borderRadius: 8,
+                                padding: '8px 12px',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: 4,
+                                fontSize: 11,
+                                color: 'var(--text-secondary)',
+                              }}>
+                                <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', paddingBottom: 2 }}>
+                                  Key Stats
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                  <span>Recent Run Flow:</span>
+                                  <strong style={{ color: 'var(--text-primary)' }}>{pRuns} runs ({pBalls} balls)</strong>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                  <span>Extras:</span>
+                                  <strong style={{ color: 'var(--text-primary)' }}>{curInn?.extras?.total ?? 0}</strong>
+                                </div>
+                                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                  <span>Wickets Fallen:</span>
+                                  <strong style={{ color: curInn?.wickets ? '#ef4444' : 'var(--text-primary)' }}>{curInn?.wickets ?? 0} / 10</strong>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Recent This Over Balls */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflowX: 'auto' }}>
+                              <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--text-muted)', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Recent:</span>
+                              {recentBalls.length === 0 ? (
+                                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Waiting for first ball</span>
+                              ) : (
+                                recentBalls.map((b, bi) => {
+                                  const isW = b.is_wicket;
+                                  const isSix = b.runs_off_bat === 6;
+                                  const isFour = b.runs_off_bat === 4;
+                                  const isExtra = !b.is_legal;
+                                  const bg = isW ? '#ef4444' : isSix ? '#8b5cf6' : isFour ? '#10b981' : isExtra ? '#f59e0b' : 'rgba(255,255,255,0.1)';
+                                  const label = isW ? 'W' : b.extra_type ? `${b.total_runs}${b.extra_type === 'wide' ? 'wd' : 'nb'}` : `${b.runs_off_bat}`;
+                                  return (
+                                    <span
+                                      key={bi}
+                                      style={{
+                                        minWidth: 22,
+                                        height: 22,
+                                        borderRadius: 11,
+                                        background: bg,
+                                        color: '#fff',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        fontSize: 10,
+                                        fontWeight: 800,
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      {label}
+                                    </span>
+                                  );
+                                })
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()
+                    ) : (
+                      <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 12, flex: 1, minWidth: 0 }}>
+                        {/* Set Grid Headers: G1, G2, G3 */}
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, paddingRight: 0 }}>
+                          {setsArray.map((_, idx) => (
+                            <span key={idx} style={{ width: 36, textAlign: 'center', fontSize: 10, fontWeight: 700, color: 'var(--text-muted)' }}>
+                              G{idx + 1}
+                            </span>
+                          ))}
+                          {match.sport === 'tennis' && gameInProgress && (
+                            <span style={{ width: 36, textAlign: 'center', fontSize: 10, fontWeight: 700, color: '#eab308' }}>
+                              PTS
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Player 1 Row */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+                          {renderPlayerName(match.player1_name, isP1Serving, match.sport)}
+                          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                            {setsArray.map((_, idx) => {
+                              const setObj = match.sets[idx];
+                              const isCurrentSet = idx === activeSetIdx && !setObj?.is_complete;
+                              const score = setObj ? setObj.player1_score : ' ';
+                              return (
+                                <span
+                                  key={idx}
+                                  style={{
+                                    width: 36,
+                                    height: 36,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    fontWeight: 800,
+                                    fontSize: 15,
+                                    fontFamily: 'var(--font-mono)',
+                                    borderRadius: 8,
+                                    background: isCurrentSet ? 'rgba(37, 99, 235, 0.08)' : 'var(--bg-elevated)',
+                                    color: isCurrentSet ? 'var(--accent)' : 'var(--text-secondary)',
+                                    border: isCurrentSet ? '1.5px solid var(--accent)' : '1px solid var(--border)',
+                                  }}
+                                >
+                                  {score}
+                                </span>
+                              );
+                            })}
+                            {match.sport === 'tennis' && gameInProgress && (
                               <span
-                                key={idx}
                                 style={{
                                   width: 36,
                                   height: 36,
                                   display: 'flex',
                                   alignItems: 'center',
                                   justifyContent: 'center',
-                                  fontWeight: 800,
-                                  fontSize: 15,
+                                  fontWeight: 850,
+                                  fontSize: 13,
                                   fontFamily: 'var(--font-mono)',
                                   borderRadius: 8,
-                                  background: isCurrentSet ? 'rgba(37, 99, 235, 0.08)' : 'var(--bg-elevated)',
-                                  color: isCurrentSet ? 'var(--accent)' : 'var(--text-secondary)',
-                                  border: isCurrentSet ? '1.5px solid var(--accent)' : '1px solid var(--border)',
+                                  background: 'rgba(250, 204, 21, 0.15)',
+                                  color: '#eab308',
+                                  border: '1.5px solid rgba(234, 179, 8, 0.4)',
                                 }}
                               >
-                                {score}
+                                {tennisP1Points}
                               </span>
-                            );
-                          })}
-                          {match.sport === 'tennis' && gameInProgress && (
-                            <span
-                              style={{
-                                width: 36,
-                                height: 36,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                fontWeight: 850,
-                                fontSize: 13,
-                                fontFamily: 'var(--font-mono)',
-                                borderRadius: 8,
-                                background: 'rgba(250, 204, 21, 0.15)',
-                                color: '#eab308',
-                                border: '1.5px solid rgba(234, 179, 8, 0.4)',
-                              }}
-                            >
-                              {tennisP1Points}
-                            </span>
-                          )}
+                            )}
+                          </div>
                         </div>
-                      </div>
 
-                      {/* Player 2 Row */}
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
-                        {renderPlayerName(match.player2_name, isP2Serving, match.sport)}
-                        <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-                          {setsArray.map((_, idx) => {
-                            const setObj = match.sets[idx];
-                            const isCurrentSet = idx === activeSetIdx && !setObj?.is_complete;
-                            const score = setObj ? setObj.player2_score : ' ';
-                            return (
+                        {/* Player 2 Row */}
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+                          {renderPlayerName(match.player2_name, isP2Serving, match.sport)}
+                          <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                            {setsArray.map((_, idx) => {
+                              const setObj = match.sets[idx];
+                              const isCurrentSet = idx === activeSetIdx && !setObj?.is_complete;
+                              const score = setObj ? setObj.player2_score : ' ';
+                              return (
+                                <span
+                                  key={idx}
+                                  style={{
+                                    width: 36,
+                                    height: 36,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    fontWeight: 800,
+                                    fontSize: 15,
+                                    fontFamily: 'var(--font-mono)',
+                                    borderRadius: 8,
+                                    background: isCurrentSet ? 'rgba(37, 99, 235, 0.08)' : 'var(--bg-elevated)',
+                                    color: isCurrentSet ? 'var(--accent)' : 'var(--text-secondary)',
+                                    border: isCurrentSet ? '1.5px solid var(--accent)' : '1px solid var(--border)',
+                                  }}
+                                >
+                                  {score}
+                                </span>
+                              );
+                            })}
+                            {match.sport === 'tennis' && gameInProgress && (
                               <span
-                                key={idx}
                                 style={{
                                   width: 36,
                                   height: 36,
                                   display: 'flex',
                                   alignItems: 'center',
                                   justifyContent: 'center',
-                                  fontWeight: 800,
-                                  fontSize: 15,
+                                  fontWeight: 850,
+                                  fontSize: 13,
                                   fontFamily: 'var(--font-mono)',
                                   borderRadius: 8,
-                                  background: isCurrentSet ? 'rgba(37, 99, 235, 0.08)' : 'var(--bg-elevated)',
-                                  color: isCurrentSet ? 'var(--accent)' : 'var(--text-secondary)',
-                                  border: isCurrentSet ? '1.5px solid var(--accent)' : '1px solid var(--border)',
+                                  background: 'rgba(250, 204, 21, 0.15)',
+                                  color: '#eab308',
+                                  border: '1.5px solid rgba(234, 179, 8, 0.4)',
                                 }}
                               >
-                                {score}
+                                {tennisP2Points}
                               </span>
-                            );
-                          })}
-                          {match.sport === 'tennis' && gameInProgress && (
-                            <span
-                              style={{
-                                width: 36,
-                                height: 36,
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                fontWeight: 850,
-                                fontSize: 13,
-                                fontFamily: 'var(--font-mono)',
-                                borderRadius: 8,
-                                background: 'rgba(250, 204, 21, 0.15)',
-                                color: '#eab308',
-                                border: '1.5px solid rgba(234, 179, 8, 0.4)',
-                              }}
-                            >
-                              {tennisP2Points}
-                            </span>
-                          )}
+                            )}
+                          </div>
                         </div>
                       </div>
-
-                    </div>
+                    )}
 
                     {/* Card Actions Footer: watch, media, chat, poll separate buttons */}
                     <div style={{
@@ -932,6 +1116,29 @@ export default function PublicLiveScoreboardPage() {
                       gap: 8,
                       flexWrap: 'wrap'
                     }}>
+                      {match.sport === 'cricket' && (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setSelectedCricketMatch(match)}
+                          style={{
+                            flex: '1 1 auto',
+                            fontSize: 12,
+                            padding: '6px 10px',
+                            color: '#fff',
+                            background: 'linear-gradient(135deg, #ea580c 0%, #c2410c 100%)',
+                            border: 'none',
+                            borderRadius: 8,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 4,
+                            fontWeight: 700,
+                            boxShadow: '0 2px 8px rgba(234, 88, 12, 0.35)',
+                          }}
+                        >
+                          📊 Scorecard & Commentary
+                        </button>
+                      )}
                       <Link
                         href={`/watch?matchId=${match.id}`}
                         className="btn btn-ghost btn-sm"
@@ -1058,6 +1265,15 @@ export default function PublicLiveScoreboardPage() {
         <MatchMediaModal 
           match={selectedMediaMatch} 
           onClose={() => setSelectedMediaMatch(null)} 
+        />
+      )}
+
+      {selectedCricketMatch && (
+        <CricketMatchModal
+          match={selectedCricketMatch}
+          tournament={tournaments.find(t => t.id === selectedCricketMatch.tournament_id)}
+          event={events.find(e => e.id === selectedCricketMatch.event_id)}
+          onClose={() => setSelectedCricketMatch(null)}
         />
       )}
     </div>

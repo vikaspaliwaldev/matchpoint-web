@@ -620,112 +620,259 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* Live Matches Ticker - Auto scrolling marquee */}
-      {filteredLiveMatches.length > 0 && (
-        <section style={{
-          background: 'var(--bg-secondary)',
-          borderTop: '1px solid var(--border)',
-          borderBottom: '1px solid var(--border)',
-          padding: '16px 0',
-          overflow: 'hidden',
-          position: 'relative',
-        }}>
-          <style>{`
-            @keyframes marquee-scroll {
-              0% { transform: translateX(0); }
-              100% { transform: translateX(-33.33%); }
-            }
-            .marquee-track {
-              display: flex;
-              gap: 20px;
-              width: max-content;
-              animation: marquee-scroll 25s linear infinite;
-            }
-            .marquee-track:hover {
-              animation-play-state: paused;
-            }
-          `}</style>
-          
-          <div style={{ display: 'flex', alignItems: 'center', position: 'relative' }}>
-            {/* Live Indicator overlay */}
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              flexShrink: 0,
-              padding: '0 24px',
-              background: 'var(--bg-secondary)',
-              zIndex: 10,
-              borderRight: '1px solid var(--border)',
-              boxShadow: '10px 0 15px -5px rgba(0,0,0,0.3)'
-            }}>
-              <span className="live-dot" />
-              <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--score-live)', letterSpacing: '0.05em' }}>LIVE SCORES</span>
-            </div>
-            
-            <div style={{ overflow: 'hidden', flex: 1, display: 'flex' }}>
-              <div className="marquee-track">
-                {/* Tripled arrays to ensure seamless loop gap coverage */}
-                {[...filteredLiveMatches, ...filteredLiveMatches, ...filteredLiveMatches].map((match, idx) => {
-                  const currentSet = match.sets?.find(s => !s.is_complete) || match.sets?.[match.sets.length - 1];
-                  const tour = dbTournaments.find(t => t.id === match.tournament_id);
-                  const ev = dbEvents.find(e => e.id === match.event_id);
-                  const tourName = tour?.name || 'Tournament';
-                  const eventName = ev?.event_name || 'Event';
-                  return (
-                    <Link
-                      key={`${match.id}-ticker-${idx}`}
-                      href="/live"
-                      className="glass-card"
-                      style={{
-                        padding: '10px 16px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: 16,
-                        textDecoration: 'none',
-                        flexShrink: 0,
-                        minWidth: 280,
-                        background: 'var(--bg-primary)',
-                        border: '1px solid var(--border)',
-                        transition: 'border-color 0.2s, transform 0.2s',
-                      }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.borderColor = 'var(--accent)';
-                        e.currentTarget.style.transform = 'translateY(-1px)';
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.borderColor = 'var(--border)';
-                        e.currentTarget.style.transform = 'none';
-                      }}
-                    >
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--accent)', textTransform: 'uppercase', marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {tourName} · {eventName}
-                        </div>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{match.player1_name}</div>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{match.player2_name}</div>
-                      </div>
-                      <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
-                        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>{currentSet?.player1_score ?? 0}</div>
-                        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-secondary)' }}>{currentSet?.player2_score ?? 0}</div>
-                      </div>
-                      {match.status === 'paused' ? (
-                        <div style={{ fontSize: 9, fontWeight: 800, color: '#fff', background: '#f59e0b', padding: '2px 6px', borderRadius: 4, letterSpacing: '0.04em', flexShrink: 0 }}>
-                          PAUSED
-                        </div>
-                      ) : match.sets.length > 1 ? (
-                        <div style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '2px 4px', borderRadius: 'var(--radius-sm)', flexShrink: 0 }}>
-                          S{match.sets.length}
-                        </div>
-                      ) : null}
-                    </Link>
-                  );
-                })}
-              </div>
-            </div>
+      {/* Live Matches Ticker */}
+      <section style={{
+        background: 'var(--bg-secondary)',
+        borderTop: '1px solid var(--border)',
+        borderBottom: '1px solid var(--border)',
+        padding: '16px 0',
+        overflow: 'hidden',
+        position: 'relative',
+      }}>
+        <style>{`
+          @keyframes marquee-scroll {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(-50%); }
+          }
+          .marquee-track {
+            display: flex;
+            gap: 20px;
+            width: max-content;
+            animation: marquee-scroll 30s linear infinite;
+          }
+          .marquee-track:hover {
+            animation-play-state: paused;
+          }
+        `}</style>
+        
+        <div style={{ display: 'flex', alignItems: 'center', position: 'relative' }}>
+          {/* Live Indicator overlay */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            flexShrink: 0,
+            padding: '0 24px',
+            background: 'var(--bg-secondary)',
+            zIndex: 10,
+            borderRight: '1px solid var(--border)',
+            boxShadow: '10px 0 15px -5px rgba(0,0,0,0.3)'
+          }}>
+            <span className="live-dot" style={{ background: filteredLiveMatches.length > 0 ? '#ef4444' : '#64748b' }} />
+            <span style={{ fontSize: 13, fontWeight: 700, color: filteredLiveMatches.length > 0 ? 'var(--score-live)' : 'var(--text-muted)', letterSpacing: '0.05em' }}>
+              LIVE SCORES
+            </span>
           </div>
-        </section>
-      )}
+          
+          <div style={{ overflow: 'hidden', flex: 1, display: 'flex', padding: '0 16px' }}>
+            {filteredLiveMatches.length === 0 ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--text-muted)', fontSize: 13, fontWeight: 500, padding: '4px 0' }}>
+                <span>⏸</span>
+                <span>No live or active matches in progress right now. Check back soon or browse upcoming fixtures.</span>
+              </div>
+            ) : filteredLiveMatches.length === 1 ? (
+              /* Single live match: Display clean single card without repeating */
+              (() => {
+                const match = filteredLiveMatches[0];
+                const currentSet = match.sets?.find(s => !s.is_complete) || match.sets?.[match.sets.length - 1];
+                const tour = dbTournaments.find(t => t.id === match.tournament_id);
+                const ev = dbEvents.find(e => e.id === match.event_id);
+                const tourName = tour?.name || 'Tournament';
+                const eventName = ev?.event_name || 'Event';
+                return (
+                  <Link
+                    key={`${match.id}-single`}
+                    href="/live"
+                    className="glass-card"
+                    style={{
+                      padding: '10px 18px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 20,
+                      textDecoration: 'none',
+                      flexShrink: 0,
+                      minWidth: 320,
+                      background: 'var(--bg-primary)',
+                      border: '1px solid var(--border)',
+                      transition: 'border-color 0.2s, transform 0.2s',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.borderColor = 'var(--accent)';
+                      e.currentTarget.style.transform = 'translateY(-1px)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.borderColor = 'var(--border)';
+                      e.currentTarget.style.transform = 'none';
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--accent)', textTransform: 'uppercase', marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {tourName} · {eventName}
+                      </div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{match.player1_name}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{match.player2_name}</div>
+                    </div>
+                    <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
+                      {match.sport === 'cricket' && match.sport_metadata ? (
+                        (() => {
+                          const cMeta = match.sport_metadata;
+                          const curInn = cMeta.current_innings === 2 && cMeta.innings_2 ? cMeta.innings_2 : cMeta.innings_1;
+                          return (
+                            <div>
+                              <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--accent)' }}>
+                                {curInn ? `${curInn.total_runs}/${curInn.wickets}` : '0/0'}
+                              </div>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)' }}>
+                                {curInn?.overs_formatted || '0.0'} ov
+                              </div>
+                            </div>
+                          );
+                        })()
+                      ) : (
+                        <>
+                          <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>{currentSet?.player1_score ?? 0}</div>
+                          <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-secondary)' }}>{currentSet?.player2_score ?? 0}</div>
+                        </>
+                      )}
+                    </div>
+                    {match.status === 'paused' ? (
+                      <div style={{ fontSize: 9, fontWeight: 800, color: '#fff', background: '#f59e0b', padding: '2px 6px', borderRadius: 4, letterSpacing: '0.04em', flexShrink: 0 }}>
+                        PAUSED
+                      </div>
+                    ) : match.sport !== 'cricket' && match.sets.length > 1 ? (
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '2px 4px', borderRadius: 'var(--radius-sm)', flexShrink: 0 }}>
+                        S{match.sets.length}
+                      </div>
+                    ) : null}
+                  </Link>
+                );
+              })()
+            ) : (
+              /* Multiple live matches: Smooth carousel track with match index indicator and cycle loop separator */
+              <div className="marquee-track">
+                {(() => {
+                  const total = filteredLiveMatches.length;
+                  return [0, 1].flatMap((cycle) =>
+                    filteredLiveMatches.map((match, mIdx) => {
+                      const currentSet = match.sets?.find(s => !s.is_complete) || match.sets?.[match.sets.length - 1];
+                      const tour = dbTournaments.find(t => t.id === match.tournament_id);
+                      const ev = dbEvents.find(e => e.id === match.event_id);
+                      const tourName = tour?.name || 'Tournament';
+                      const eventName = ev?.event_name || 'Event';
+                      const isFirstInCycle = mIdx === 0 && cycle > 0;
+
+                      return (
+                        <div key={`${match.id}-cycle-${cycle}-${mIdx}`} style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+                          {isFirstInCycle && (
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                padding: '6px 12px',
+                                background: 'rgba(59, 130, 246, 0.1)',
+                                border: '1px dashed rgba(59, 130, 246, 0.35)',
+                                borderRadius: '20px',
+                                fontSize: 11,
+                                fontWeight: 700,
+                                color: 'var(--accent)',
+                                flexShrink: 0,
+                                whiteSpace: 'nowrap',
+                                letterSpacing: '0.04em',
+                              }}
+                            >
+                              <span>🔄</span>
+                              <span>REPLAYING ALL {total} MATCHES</span>
+                            </div>
+                          )}
+                          <Link
+                            href="/live"
+                            className="glass-card"
+                            style={{
+                              padding: '10px 16px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 16,
+                              textDecoration: 'none',
+                              flexShrink: 0,
+                              minWidth: 290,
+                              background: 'var(--bg-primary)',
+                              border: '1px solid var(--border)',
+                              transition: 'border-color 0.2s, transform 0.2s',
+                            }}
+                            onMouseEnter={(e) => {
+                              e.currentTarget.style.borderColor = 'var(--accent)';
+                              e.currentTarget.style.transform = 'translateY(-1px)';
+                            }}
+                            onMouseLeave={(e) => {
+                              e.currentTarget.style.borderColor = 'var(--border)';
+                              e.currentTarget.style.transform = 'none';
+                            }}
+                          >
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                                <span style={{
+                                  fontSize: 9,
+                                  fontWeight: 800,
+                                  padding: '1px 5px',
+                                  borderRadius: 4,
+                                  background: 'var(--bg-secondary)',
+                                  border: '1px solid var(--border)',
+                                  color: 'var(--text-muted)',
+                                  letterSpacing: '0.03em',
+                                }}>
+                                  MATCH {mIdx + 1}/{total}
+                                </span>
+                                <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--accent)', textTransform: 'uppercase', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                  {tourName} · {eventName}
+                                </span>
+                              </div>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{match.player1_name}</div>
+                              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{match.player2_name}</div>
+                            </div>
+                            <div style={{ textAlign: 'right', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
+                              {match.sport === 'cricket' && match.sport_metadata ? (
+                                (() => {
+                                  const cMeta = match.sport_metadata;
+                                  const curInn = cMeta.current_innings === 2 && cMeta.innings_2 ? cMeta.innings_2 : cMeta.innings_1;
+                                  return (
+                                    <div>
+                                      <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--accent)' }}>
+                                        {curInn ? `${curInn.total_runs}/${curInn.wickets}` : '0/0'}
+                                      </div>
+                                      <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)' }}>
+                                        {curInn?.overs_formatted || '0.0'} ov
+                                      </div>
+                                    </div>
+                                  );
+                                })()
+                              ) : (
+                                <>
+                                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>{currentSet?.player1_score ?? 0}</div>
+                                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-secondary)' }}>{currentSet?.player2_score ?? 0}</div>
+                                </>
+                              )}
+                            </div>
+                            {match.status === 'paused' ? (
+                              <div style={{ fontSize: 9, fontWeight: 800, color: '#fff', background: '#f59e0b', padding: '2px 6px', borderRadius: 4, letterSpacing: '0.04em', flexShrink: 0 }}>
+                                PAUSED
+                              </div>
+                            ) : match.sport !== 'cricket' && match.sets.length > 1 ? (
+                              <div style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-secondary)', padding: '2px 4px', borderRadius: 'var(--radius-sm)', flexShrink: 0 }}>
+                                S{match.sets.length}
+                              </div>
+                            ) : null}
+                          </Link>
+                        </div>
+                      );
+                    })
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* Public Explorer Hub */}
       <section id="explorer" style={{ padding: '60px 0', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>

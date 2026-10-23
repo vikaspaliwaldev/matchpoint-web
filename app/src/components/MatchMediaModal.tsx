@@ -250,11 +250,35 @@ export default function MatchMediaModal({ match, onClose }: MatchMediaModalProps
               {match.player1_name} vs {match.player2_name} {match.court ? `· ${match.court}` : ''}
             </p>
           </div>
-          <button 
-            className="btn btn-ghost btn-icon" 
-            onClick={onClose} 
-            style={{ color: '#94a3b8', fontSize: 20 }}
-          >✕</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {match.sport === 'cricket' && (
+              <a
+                href={`/overlay/cricket?matchId=${match.id}&theme=ipl&position=bottom`}
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: 6,
+                  fontSize: 11,
+                  fontWeight: 800,
+                  background: 'linear-gradient(135deg, #ea580c 0%, #c2410c 100%)',
+                  color: '#ffffff',
+                  textDecoration: 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  boxShadow: '0 2px 8px rgba(234, 88, 12, 0.4)',
+                }}
+              >
+                📡 OBS / Live Overlay
+              </a>
+            )}
+            <button 
+              className="btn btn-ghost btn-icon" 
+              onClick={onClose} 
+              style={{ color: '#94a3b8', fontSize: 20 }}
+            >✕</button>
+          </div>
         </div>
 
         {/* Dynamic Media Section Layout */}

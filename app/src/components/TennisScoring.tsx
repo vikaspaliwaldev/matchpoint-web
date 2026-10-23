@@ -4,7 +4,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Match, TournamentEvent, Tournament, MatchSet } from '@/types';
 import { updateMatchScore, logAction } from '@/lib/supabase-service';
 import { useAuth } from '@/lib/auth-context';
-import { isTennisSetComplete, formatTennisGameScore, TennisMetadata } from '@/lib/sports-rules';
+import { isTennisSetComplete, formatTennisGameScore, TennisMetadata, TennisPointType, TennisPointStats } from '@/lib/sports-rules';
+import { saveOfflineScorePayload, flushAllOfflineScores } from '@/lib/offline-scoring';
 import { IconPlay, IconPause, IconUndo, IconCheck, IconArrowLeft, IconTrophy } from '@/components/icons';
 
 interface TennisScoringProps {
@@ -22,6 +23,10 @@ interface TennisHistoryState {
   inTiebreak: boolean;
   servingTeam: 'player1' | 'player2';
   courtSides: { left: 'player1' | 'player2'; right: 'player1' | 'player2' };
+  statsP1: TennisPointStats;
+  statsP2: TennisPointStats;
+  timeoutsP1: number;
+  timeoutsP2: number;
 }
 
 export default function TennisScoring({
@@ -34,6 +39,35 @@ export default function TennisScoring({
   
   const [isScoringFullscreen, setIsScoringFullscreen] = useState(false);
   const scorecardRef = useRef<HTMLDivElement | null>(null);
+
+  // Offline status & Auto-sync state
+  const [isOnline, setIsOnline] = useState(() => typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'offline'>('idle');
+
+  useEffect(() => {
+    const handleOnline = async () => {
+      setIsOnline(true);
+      setSyncStatus('syncing');
+      try {
+        await flushAllOfflineScores();
+        setSyncStatus('synced');
+        setTimeout(() => setSyncStatus('idle'), 3000);
+      } catch (e) {
+        console.error('Error flushing offline scores:', e);
+        setSyncStatus('idle');
+      }
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      setSyncStatus('offline');
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   const toggleFullscreen = useCallback(() => {
     const container = scorecardRef.current;
@@ -75,15 +109,37 @@ export default function TennisScoring({
   // Tennis config (best of 3 sets, 2 sets to win)
   const setsToWin = 2;
 
+  // Metadata retrieval
+  const existingMeta = (match.sport_metadata as TennisMetadata) || {};
+
   // Game states
   const [matchStarted, setMatchStarted] = useState(match.status === 'running');
   const [isPaused, setIsPaused] = useState(false);
   const [matchElapsed, setMatchElapsed] = useState(0);
-  const [totalPausedTime, setTotalPausedTime] = useState(0);
+  const [totalPausedTime, setTotalPausedTime] = useState(existingMeta.total_paused_seconds || 0);
   const [pauseElapsed, setPauseElapsed] = useState(0);
   const [declareWinnerOpen, setDeclareWinnerOpen] = useState(false);
   const [earlyConcludeReason, setEarlyConcludeReason] = useState<string>('Retirement / Medical Injury');
   const [customEarlyConcludeReason, setCustomEarlyConcludeReason] = useState<string>('');
+
+  // Timeouts Configuration & Usage
+  const [maxTimeouts, setMaxTimeouts] = useState<number>(existingMeta.max_timeouts ?? 2);
+  const [timeoutScope, setTimeoutScope] = useState<'set' | 'match'>(existingMeta.timeout_scope ?? 'set');
+  const [timeoutsP1, setTimeoutsP1] = useState<number>(existingMeta.timeouts_p1 ?? 0);
+  const [timeoutsP2, setTimeoutsP2] = useState<number>(existingMeta.timeouts_p2 ?? 0);
+
+  // Statistics
+  const [statsP1, setStatsP1] = useState<TennisPointStats>(
+    existingMeta.stats_p1 || { aces: 0, winners: 0, double_faults: 0, opponent_errors: 0 }
+  );
+  const [statsP2, setStatsP2] = useState<TennisPointStats>(
+    existingMeta.stats_p2 || { aces: 0, winners: 0, double_faults: 0, opponent_errors: 0 }
+  );
+
+  // Modals
+  const [showStatsModal, setShowStatsModal] = useState(false);
+  const [showAttributionSheet, setShowAttributionSheet] = useState(false);
+  const [showConfigModal, setShowConfigModal] = useState(false);
   
   // Players layout position
   const [courtSides, setCourtSides] = useState<{ left: 'player1' | 'player2'; right: 'player1' | 'player2' }>({
@@ -138,13 +194,13 @@ export default function TennisScoring({
   });
 
   // Current Game/Tiebreaker points
-  const [p1GamePoints, setP1GamePoints] = useState(0);
-  const [p2GamePoints, setP2GamePoints] = useState(0);
-  const [inTiebreak, setInTiebreak] = useState(false);
+  const [p1GamePoints, setP1GamePoints] = useState(existingMeta.player1_game_points ?? 0);
+  const [p2GamePoints, setP2GamePoints] = useState(existingMeta.player2_game_points ?? 0);
+  const [inTiebreak, setInTiebreak] = useState(existingMeta.in_tiebreak ?? false);
 
   // Initial and current server
-  const [initialServer, setInitialServer] = useState<'player1' | 'player2'>('player1');
-  const [servingTeam, setServingTeam] = useState<'player1' | 'player2'>('player1');
+  const [initialServer, setInitialServer] = useState<'player1' | 'player2'>(existingMeta.first_server || 'player1');
+  const [servingTeam, setServingTeam] = useState<'player1' | 'player2'>(existingMeta.serving_team || 'player1');
 
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [vibrateEnabled, setVibrateEnabled] = useState(true);
@@ -216,7 +272,7 @@ export default function TennisScoring({
     };
   }, [isPaused, pauseElapsed]);
 
-  // Sync state to DB
+  // Sync state to DB & Local offline cache
   const saveStateToDB = async (
     updatedSets: MatchSet[], 
     overrideStatus?: Match['status'], 
@@ -232,8 +288,28 @@ export default function TennisScoring({
       in_tiebreak: inTiebreak,
       serving_team: servingTeam,
       first_server: initialServer,
+      timeouts_p1: timeoutsP1,
+      timeouts_p2: timeoutsP2,
+      max_timeouts: maxTimeouts,
+      timeout_scope: timeoutScope,
+      stats_p1: statsP1,
+      stats_p2: statsP2,
+      total_paused_seconds: totalPausedTime,
       ...extraMeta
     };
+
+    saveOfflineScorePayload({
+      matchId: match.id,
+      sets: updatedSets,
+      status: finalStatus,
+      winnerId: finalWinner,
+      actualStartTime: overrideStatus === 'running' ? new Date().toISOString() : match.actual_start_time,
+      actualEndTime: finalStatus === 'completed' ? new Date().toISOString() : null,
+      court: selectedCourt,
+      sportType: 'tennis',
+      sportMetadata: meta,
+      updatedAt: new Date().toISOString(),
+    });
 
     try {
       await updateMatchScore(
@@ -251,7 +327,7 @@ export default function TennisScoring({
       );
       onScoreUpdated();
     } catch (err) {
-      console.error('Failed to sync Tennis score:', err);
+      console.warn('Network issue saving Tennis score, cached offline:', err);
     }
   };
 
@@ -263,13 +339,32 @@ export default function TennisScoring({
     await logAction('Match Started', 'match', `Tennis match started: ${match.player1_name} vs ${match.player2_name}`, user ? { id: user.id, name: user.name } : null);
   };
 
+  const handleTimeout = async (team: 'player1' | 'player2') => {
+    if (isPaused || isMatchComplete || !matchStarted) return;
+    if (team === 'player1' && timeoutsP1 >= maxTimeouts) return;
+    if (team === 'player2' && timeoutsP2 >= maxTimeouts) return;
+
+    const nextP1Timeouts = team === 'player1' ? timeoutsP1 + 1 : timeoutsP1;
+    const nextP2Timeouts = team === 'player2' ? timeoutsP2 + 1 : timeoutsP2;
+
+    setTimeoutsP1(nextP1Timeouts);
+    setTimeoutsP2(nextP2Timeouts);
+    setIsPaused(true);
+    playBeep(440, 0.3);
+
+    await saveStateToDB(sets, undefined, undefined, {
+      timeouts_p1: nextP1Timeouts,
+      timeouts_p2: nextP2Timeouts,
+    });
+  };
+
   // Switch server helper
   const getNextRegularServer = (current: 'player1' | 'player2') => {
     return current === 'player1' ? 'player2' : 'player1';
   };
 
-  // Add Point
-  const handleAddPoint = (player: 'player1' | 'player2') => {
+  // Add Point with Classification
+  const handleAddPoint = (player: 'player1' | 'player2', pointType: TennisPointType = 'quick') => {
     if (!matchStarted || isMatchComplete || isPaused) return;
 
     // Save history for Undo
@@ -282,12 +377,34 @@ export default function TennisScoring({
         p2GamePoints,
         inTiebreak,
         servingTeam,
-        courtSides: { ...courtSides }
+        courtSides: { ...courtSides },
+        statsP1: { ...statsP1 },
+        statsP2: { ...statsP2 },
+        timeoutsP1,
+        timeoutsP2,
       }
     ]);
 
     playBeep(player === 'player1' ? 880 : 980);
     triggerVibrate();
+
+    // Update stats
+    let nextStatsP1 = { ...statsP1 };
+    let nextStatsP2 = { ...statsP2 };
+
+    if (player === 'player1') {
+      if (pointType === 'ace') nextStatsP1.aces++;
+      else if (pointType === 'forehand_winner' || pointType === 'backhand_winner' || pointType === 'volley_winner') nextStatsP1.winners++;
+      else if (pointType === 'opp_double_fault') nextStatsP2.double_faults++;
+      else if (pointType === 'opp_unforced_error') nextStatsP1.opponent_errors++;
+    } else {
+      if (pointType === 'ace') nextStatsP2.aces++;
+      else if (pointType === 'forehand_winner' || pointType === 'backhand_winner' || pointType === 'volley_winner') nextStatsP2.winners++;
+      else if (pointType === 'opp_double_fault') nextStatsP1.double_faults++;
+      else if (pointType === 'opp_unforced_error') nextStatsP2.opponent_errors++;
+    }
+    setStatsP1(nextStatsP1);
+    setStatsP2(nextStatsP2);
 
     let nextP1Points = p1GamePoints;
     let nextP2Points = p2GamePoints;
@@ -295,6 +412,8 @@ export default function TennisScoring({
     let nextServingTeam = servingTeam;
     let nextSets = [...sets];
     let nextSetIdx = currentSetIdx;
+    let nextTimeoutsP1 = timeoutsP1;
+    let nextTimeoutsP2 = timeoutsP2;
 
     if (inTiebreak) {
       // Tiebreak scoring: count 1, 2, 3...
@@ -416,6 +535,12 @@ export default function TennisScoring({
           player2_score: 0,
           is_complete: false
         });
+        if (timeoutScope === 'set') {
+          nextTimeoutsP1 = 0;
+          nextTimeoutsP2 = 0;
+          setTimeoutsP1(0);
+          setTimeoutsP2(0);
+        }
         setTimeout(() => playBeep(520, 0.2), 300);
       } else {
         setTimeout(() => playBeep(1200, 0.4), 300);
@@ -453,12 +578,20 @@ export default function TennisScoring({
     setSets(prev.sets);
     setCurrentSetIdx(prev.currentSetIdx);
     setCourtSides(prev.courtSides);
+    setStatsP1(prev.statsP1);
+    setStatsP2(prev.statsP2);
+    setTimeoutsP1(prev.timeoutsP1);
+    setTimeoutsP2(prev.timeoutsP2);
 
     saveStateToDB(prev.sets, undefined, undefined, {
       player1_game_points: prev.p1GamePoints,
       player2_game_points: prev.p2GamePoints,
       in_tiebreak: prev.inTiebreak,
-      serving_team: prev.servingTeam
+      serving_team: prev.servingTeam,
+      stats_p1: prev.statsP1,
+      stats_p2: prev.statsP2,
+      timeouts_p1: prev.timeoutsP1,
+      timeouts_p2: prev.timeoutsP2,
     });
   };
 
@@ -548,14 +681,44 @@ export default function TennisScoring({
         {/* Header Info */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-            <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-              🥎 Tennis · {selectedCourt} {matchStarted && `· ⏱ ${formatTime(matchElapsed - totalPausedTime)}`}
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                🥎 Tennis · {selectedCourt} {matchStarted && `· ⏱ ${formatTime(matchElapsed - totalPausedTime)}`}
+              </span>
+              <span style={{
+                fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+                background: !isOnline ? '#ef4444' : syncStatus === 'syncing' ? '#f59e0b' : '#10b981',
+                color: '#fff',
+              }}>
+                {!isOnline ? 'OFFLINE' : syncStatus === 'syncing' ? 'SYNCING...' : 'ONLINE'}
+              </span>
+            </div>
             <h2 style={{ fontSize: 18, fontWeight: 700, marginTop: 2 }}>
               {tournament?.name || 'MatchPoint Tournament'}
             </h2>
           </div>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <button 
+              onClick={() => setShowAttributionSheet(true)}
+              style={{ padding: '6px 10px', borderRadius: 8, background: 'rgba(59,130,246,0.15)', border: '1px solid rgba(59,130,246,0.3)', color: '#3b82f6', fontSize: 12, fontWeight: 700 }}
+              title="Point Breakdown / Reason"
+            >
+              ⚡ Rally Type
+            </button>
+            <button 
+              onClick={() => setShowStatsModal(true)}
+              style={{ padding: '6px 10px', borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', fontSize: 12, fontWeight: 700 }}
+              title="Match Statistics"
+            >
+              📊 Stats
+            </button>
+            <button 
+              onClick={() => setShowConfigModal(true)}
+              style={{ padding: 8, borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', fontSize: 12 }}
+              title="Configure Timeouts"
+            >
+              ⚙️
+            </button>
             <button 
               onClick={() => setSoundEnabled(prev => !prev)}
               style={{ padding: 8, borderRadius: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', fontSize: 14 }}
@@ -587,7 +750,7 @@ export default function TennisScoring({
           </div>
         </div>
 
-        {/* Set Tracker Indicator */}
+        {/* Set Tracker Indicator & Timeouts */}
         <div 
           className={isScoringFullscreen ? 'fullscreen-scorebar' : ''}
           style={{
@@ -601,12 +764,12 @@ export default function TennisScoring({
         }}>
           <div style={{ textAlign: 'right', flex: 1 }}>
             <div style={{ fontSize: 12, fontWeight: 700 }}>{match.player1_name}</div>
-            <div style={{ fontSize: 11, color: '#2563eb', fontWeight: 800 }}>Sets Won: {p1SetsWon}</div>
+            <div style={{ fontSize: 11, color: '#2563eb', fontWeight: 800 }}>Sets: {p1SetsWon} · TO: {timeoutsP1}/{maxTimeouts}</div>
           </div>
           <div style={{ fontSize: 12, fontWeight: 800, color: 'var(--text-muted)' }}>vs</div>
           <div style={{ textAlign: 'left', flex: 1 }}>
             <div style={{ fontSize: 12, fontWeight: 700 }}>{match.player2_name}</div>
-            <div style={{ fontSize: 11, color: '#10b981', fontWeight: 800 }}>Sets Won: {p2SetsWon}</div>
+            <div style={{ fontSize: 11, color: '#10b981', fontWeight: 800 }}>Sets: {p2SetsWon} · TO: {timeoutsP2}/{maxTimeouts}</div>
           </div>
         </div>
 
@@ -711,32 +874,112 @@ export default function TennisScoring({
               }} />
 
               {/* Left Side Player Info & Game Score */}
-              <div style={{
-                position: 'absolute', top: '10%', bottom: '10%', left: '5%', right: '55%',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
-                pointerEvents: 'none', zIndex: 15,
-              }}>
-                <span style={{ fontSize: isDoubles ? 12 : 13, fontWeight: 700, color: 'rgba(255,255,255,0.85)', textTransform: 'uppercase', textAlign: 'center' }}>{leftPlayerName}</span>
-                <span style={{ fontSize: 'clamp(24px, 10vh, 54px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', margin: '2px 0' }}>{leftPoints}</span>
-                <div style={{ fontSize: 11, fontWeight: 700, color: '#facc15' }}>Games: {leftGames}</div>
-                {servingTeam === courtSides.left && (
-                  <span style={{ fontSize: 9, background: '#ef4444', color: '#fff', padding: '1px 5px', borderRadius: 4, fontWeight: 700, letterSpacing: 0.5, marginTop: 2 }}>SERVING</span>
-                )}
-              </div>
+              {isDoubles ? (
+                <>
+                  {/* Left Side - Top Quadrant (Ad Court / Net Player) */}
+                  <div style={{
+                    position: 'absolute', top: '10%', bottom: '50%', left: '4%', right: '54%',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                    pointerEvents: 'none', zIndex: 15,
+                  }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: 'rgba(255,255,255,0.9)', textAlign: 'center', textShadow: '0 2px 6px rgba(0,0,0,0.85)', lineHeight: 1.2 }}>
+                      {courtSides.left === 'player1' ? t1Positions.p2 : t2Positions.p2}
+                    </span>
+                    <span style={{ fontSize: 8, background: 'rgba(255,255,255,0.2)', color: '#fff', padding: '1px 4px', borderRadius: 3, marginTop: 2, fontWeight: 700 }}>NET / AD</span>
+                  </div>
+                  {/* Left Side - Bottom Quadrant (Deuce Court / Baseline Server) */}
+                  <div style={{
+                    position: 'absolute', top: '50%', bottom: '10%', left: '4%', right: '54%',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                    pointerEvents: 'none', zIndex: 15,
+                  }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: '#ffffff', textAlign: 'center', textShadow: '0 2px 6px rgba(0,0,0,0.85)', lineHeight: 1.2 }}>
+                      {courtSides.left === 'player1' ? t1Positions.p1 : t2Positions.p1}
+                    </span>
+                    {servingTeam === courtSides.left ? (
+                      <span style={{ fontSize: 8, background: '#ef4444', color: '#fff', padding: '1px 5px', borderRadius: 4, marginTop: 2, fontWeight: 700, letterSpacing: 0.5 }}>SERVING</span>
+                    ) : (
+                      <span style={{ fontSize: 8, background: 'rgba(255,255,255,0.2)', color: '#fff', padding: '1px 4px', borderRadius: 3, marginTop: 2, fontWeight: 700 }}>DEUCE</span>
+                    )}
+                  </div>
+                  {/* Left Side - Center Score Overlay */}
+                  <div style={{
+                    position: 'absolute', top: '50%', left: '26%', transform: 'translate(-50%, -50%)',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center',
+                    pointerEvents: 'none', zIndex: 14, opacity: 0.9
+                  }}>
+                    <span style={{ fontSize: 'clamp(24px, 10vh, 52px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', textShadow: '0 4px 14px rgba(0,0,0,0.8)' }}>{leftPoints}</span>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: '#facc15', textShadow: '0 2px 4px rgba(0,0,0,0.8)' }}>Games: {leftGames}</div>
+                  </div>
+                </>
+              ) : (
+                <div style={{
+                  position: 'absolute', top: '10%', bottom: '10%', left: '5%', right: '55%',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                  pointerEvents: 'none', zIndex: 15,
+                }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,0.85)', textTransform: 'uppercase', textAlign: 'center' }}>{leftPlayerName}</span>
+                  <span style={{ fontSize: 'clamp(24px, 10vh, 54px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', margin: '2px 0' }}>{leftPoints}</span>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#facc15' }}>Games: {leftGames}</div>
+                  {servingTeam === courtSides.left && (
+                    <span style={{ fontSize: 9, background: '#ef4444', color: '#fff', padding: '1px 5px', borderRadius: 4, fontWeight: 700, letterSpacing: 0.5, marginTop: 2 }}>SERVING</span>
+                  )}
+                </div>
+              )}
 
               {/* Right Side Player Info & Game Score */}
-              <div style={{
-                position: 'absolute', top: '5%', bottom: '5%', left: '55%', right: '5%',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
-                pointerEvents: 'none', zIndex: 15,
-              }}>
-                <span style={{ fontSize: isDoubles ? 11 : 12, fontWeight: 700, color: 'rgba(255,255,255,0.85)', textTransform: 'uppercase', textAlign: 'center' }}>{rightPlayerName}</span>
-                <span style={{ fontSize: 'clamp(24px, 10vh, 54px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', margin: '2px 0' }}>{rightPoints}</span>
-                <div style={{ fontSize: 11, fontWeight: 700, color: '#facc15' }}>Games: {rightGames}</div>
-                {servingTeam === courtSides.right && (
-                  <span style={{ fontSize: 9, background: '#10b981', color: '#fff', padding: '1px 5px', borderRadius: 4, fontWeight: 700, letterSpacing: 0.5, marginTop: 2 }}>SERVING</span>
-                )}
-              </div>
+              {isDoubles ? (
+                <>
+                  {/* Right Side - Top Quadrant (Deuce Receiver Court) */}
+                  <div style={{
+                    position: 'absolute', top: '10%', bottom: '50%', left: '54%', right: '4%',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                    pointerEvents: 'none', zIndex: 15,
+                  }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: '#ffffff', textAlign: 'center', textShadow: '0 2px 6px rgba(0,0,0,0.85)', lineHeight: 1.2 }}>
+                      {courtSides.right === 'player1' ? t1Positions.p1 : t2Positions.p1}
+                    </span>
+                    {servingTeam === courtSides.right ? (
+                      <span style={{ fontSize: 8, background: '#10b981', color: '#fff', padding: '1px 5px', borderRadius: 4, marginTop: 2, fontWeight: 700, letterSpacing: 0.5 }}>SERVING</span>
+                    ) : (
+                      <span style={{ fontSize: 8, background: 'rgba(255,255,255,0.2)', color: '#fff', padding: '1px 4px', borderRadius: 3, marginTop: 2, fontWeight: 700 }}>DEUCE</span>
+                    )}
+                  </div>
+                  {/* Right Side - Bottom Quadrant (Ad Court / Net Player) */}
+                  <div style={{
+                    position: 'absolute', top: '50%', bottom: '10%', left: '54%', right: '4%',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                    pointerEvents: 'none', zIndex: 15,
+                  }}>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: 'rgba(255,255,255,0.9)', textAlign: 'center', textShadow: '0 2px 6px rgba(0,0,0,0.85)', lineHeight: 1.2 }}>
+                      {courtSides.right === 'player1' ? t1Positions.p2 : t2Positions.p2}
+                    </span>
+                    <span style={{ fontSize: 8, background: 'rgba(255,255,255,0.2)', color: '#fff', padding: '1px 4px', borderRadius: 3, marginTop: 2, fontWeight: 700 }}>NET / AD</span>
+                  </div>
+                  {/* Right Side - Center Score Overlay */}
+                  <div style={{
+                    position: 'absolute', top: '50%', left: '74%', transform: 'translate(-50%, -50%)',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center',
+                    pointerEvents: 'none', zIndex: 14, opacity: 0.9
+                  }}>
+                    <span style={{ fontSize: 'clamp(24px, 10vh, 52px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', textShadow: '0 4px 14px rgba(0,0,0,0.8)' }}>{rightPoints}</span>
+                    <div style={{ fontSize: 11, fontWeight: 800, color: '#facc15', textShadow: '0 2px 4px rgba(0,0,0,0.8)' }}>Games: {rightGames}</div>
+                  </div>
+                </>
+              ) : (
+                <div style={{
+                  position: 'absolute', top: '5%', bottom: '5%', left: '55%', right: '5%',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column',
+                  pointerEvents: 'none', zIndex: 15,
+                }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,0.85)', textTransform: 'uppercase', textAlign: 'center' }}>{rightPlayerName}</span>
+                  <span style={{ fontSize: 'clamp(24px, 10vh, 54px)', fontWeight: 900, fontFamily: 'monospace', color: '#ffffff', margin: '2px 0' }}>{rightPoints}</span>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: '#facc15' }}>Games: {rightGames}</div>
+                  {servingTeam === courtSides.right && (
+                    <span style={{ fontSize: 9, background: '#10b981', color: '#fff', padding: '1px 5px', borderRadius: 4, fontWeight: 700, letterSpacing: 0.5, marginTop: 2 }}>SERVING</span>
+                  )}
+                </div>
+              )}
 
               {/* Left touch target */}
               <button
@@ -806,6 +1049,71 @@ export default function TennisScoring({
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+
+          {/* Point Breakdown / Quick Attribution Bar */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            background: 'rgba(35, 93, 58, 0.15)',
+            border: '1px solid rgba(35, 93, 58, 0.4)',
+            borderRadius: 'var(--radius-md)',
+            padding: '8px 12px',
+            marginTop: 8,
+            gap: 8,
+            flexWrap: 'wrap'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: '#34d399', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                ⚡ Point Type:
+              </span>
+              <button
+                onClick={() => setShowAttributionSheet(true)}
+                className="btn btn-primary btn-sm"
+                style={{ fontSize: 11, padding: '4px 10px', height: 28, fontWeight: 700 }}
+              >
+                + Detailed Reason...
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <button
+                onClick={() => handleAddPoint(courtSides.left, 'ace')}
+                disabled={!matchStarted || isMatchComplete || isPaused}
+                className="btn btn-secondary btn-sm"
+                style={{ fontSize: 11, padding: '4px 8px', height: 28, fontWeight: 700, color: '#2563eb' }}
+                title={`Ace for ${courtSides.left === 'player1' ? match.player1_name : match.player2_name}`}
+              >
+                🎯 Ace L
+              </button>
+              <button
+                onClick={() => handleAddPoint(courtSides.left, 'forehand_winner')}
+                disabled={!matchStarted || isMatchComplete || isPaused}
+                className="btn btn-secondary btn-sm"
+                style={{ fontSize: 11, padding: '4px 8px', height: 28, fontWeight: 700, color: '#2563eb' }}
+                title={`Winner for ${courtSides.left === 'player1' ? match.player1_name : match.player2_name}`}
+              >
+                ⚡ Winner L
+              </button>
+              <button
+                onClick={() => handleAddPoint(courtSides.right, 'ace')}
+                disabled={!matchStarted || isMatchComplete || isPaused}
+                className="btn btn-secondary btn-sm"
+                style={{ fontSize: 11, padding: '4px 8px', height: 28, fontWeight: 700, color: '#10b981' }}
+                title={`Ace for ${courtSides.right === 'player1' ? match.player1_name : match.player2_name}`}
+              >
+                🎯 Ace R
+              </button>
+              <button
+                onClick={() => handleAddPoint(courtSides.right, 'forehand_winner')}
+                disabled={!matchStarted || isMatchComplete || isPaused}
+                className="btn btn-secondary btn-sm"
+                style={{ fontSize: 11, padding: '4px 8px', height: 28, fontWeight: 700, color: '#10b981' }}
+                title={`Winner for ${courtSides.right === 'player1' ? match.player1_name : match.player2_name}`}
+              >
+                ⚡ Winner R
+              </button>
             </div>
           </div>
 
@@ -886,6 +1194,34 @@ export default function TennisScoring({
                 </button>
               </>
             )}
+            {/* Timeout Buttons */}
+            <button 
+              onClick={() => handleTimeout('player1')}
+              disabled={timeoutsP1 >= maxTimeouts || isPaused || isMatchComplete || !matchStarted}
+              className="btn"
+              style={{
+                flex: 1, height: 48, background: 'rgba(37,99,235,0.1)', border: '1px solid rgba(37,99,235,0.3)',
+                color: '#3b82f6', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 12, fontWeight: 700,
+                opacity: timeoutsP1 >= maxTimeouts || isPaused ? 0.5 : 1, minWidth: '110px'
+              }}
+              title={`Call Timeout for ${match.player1_name}`}
+            >
+              ⏱ TO ({timeoutsP1}/{maxTimeouts}) L
+            </button>
+            <button 
+              onClick={() => handleTimeout('player2')}
+              disabled={timeoutsP2 >= maxTimeouts || isPaused || isMatchComplete || !matchStarted}
+              className="btn"
+              style={{
+                flex: 1, height: 48, background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.3)',
+                color: '#10b981', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 12, fontWeight: 700,
+                opacity: timeoutsP2 >= maxTimeouts || isPaused ? 0.5 : 1, minWidth: '110px'
+              }}
+              title={`Call Timeout for ${match.player2_name}`}
+            >
+              ⏱ TO ({timeoutsP2}/{maxTimeouts}) R
+            </button>
+
             <div className={isScoringFullscreen ? "fullscreen-declare-winner" : ""} style={{ flex: 1, minWidth: '120px' }}>
               <button 
                 onClick={() => setDeclareWinnerOpen(true)}
@@ -902,6 +1238,131 @@ export default function TennisScoring({
             </div>
           </div>
         </>
+      )}
+
+      {/* Match Statistics Modal */}
+      {showStatsModal && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000, padding: 16
+        }}>
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-lg)', padding: 24, maxWidth: 460, width: '100%',
+            boxShadow: 'var(--glass-shadow)'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 800, margin: 0 }}>📊 Tennis Statistics</h3>
+              <button onClick={() => setShowStatsModal(false)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer' }}>✕</button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 8, alignItems: 'center', marginBottom: 16 }}>
+              <div style={{ textAlign: 'center', fontWeight: 800, color: '#2563eb', fontSize: 13 }}>{match.player1_name}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1 }}>Metric</div>
+              <div style={{ textAlign: 'center', fontWeight: 800, color: '#10b981', fontSize: 13 }}>{match.player2_name}</div>
+
+              {[
+                { label: 'Aces', p1: statsP1.aces, p2: statsP2.aces },
+                { label: 'Winners (Fore/Back/Volley)', p1: statsP1.winners, p2: statsP2.winners },
+                { label: 'Double Faults', p1: statsP1.double_faults, p2: statsP2.double_faults },
+                { label: 'Opponent Errors', p1: statsP1.opponent_errors, p2: statsP2.opponent_errors },
+                { label: 'Timeouts Used', p1: `${timeoutsP1}/${maxTimeouts}`, p2: `${timeoutsP2}/${maxTimeouts}` },
+              ].map((m, i) => (
+                <React.Fragment key={i}>
+                  <div style={{ background: 'rgba(37,99,235,0.1)', padding: 8, borderRadius: 8, textAlign: 'center', fontWeight: 800, color: '#3b82f6' }}>{m.p1}</div>
+                  <div style={{ textAlign: 'center', fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{m.label}</div>
+                  <div style={{ background: 'rgba(16,185,129,0.1)', padding: 8, borderRadius: 8, textAlign: 'center', fontWeight: 800, color: '#10b981' }}>{m.p2}</div>
+                </React.Fragment>
+              ))}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowStatsModal(false)} className="btn btn-primary" style={{ padding: '8px 20px', fontWeight: 700 }}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Point Attribution Sheet Modal */}
+      {showAttributionSheet && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000, padding: 16
+        }} onClick={() => setShowAttributionSheet(false)}>
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-lg)', padding: 20, maxWidth: 600, width: '100%',
+            boxShadow: 'var(--glass-shadow)'
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 800, margin: 0 }}>⚡ Award Tennis Point with Reason</h3>
+              <button onClick={() => setShowAttributionSheet(false)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: 14, cursor: 'pointer' }}>✕</button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              {/* Player 1 Options */}
+              <div style={{ background: 'rgba(37,99,235,0.06)', border: '1px solid rgba(37,99,235,0.2)', borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ fontWeight: 800, color: '#2563eb', fontSize: 13, marginBottom: 4 }}>🔵 {match.player1_name}</div>
+                <button onClick={() => { handleAddPoint('player1', 'ace'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>🎯 Service Ace</button>
+                <button onClick={() => { handleAddPoint('player1', 'forehand_winner'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>⚡ Forehand Winner</button>
+                <button onClick={() => { handleAddPoint('player1', 'backhand_winner'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>💫 Backhand Winner</button>
+                <button onClick={() => { handleAddPoint('player1', 'volley_winner'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>🏐 Net Volley Winner</button>
+                <button onClick={() => { handleAddPoint('player1', 'opp_double_fault'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>⚠️ Opp Double Fault</button>
+                <button onClick={() => { handleAddPoint('player1', 'opp_unforced_error'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>❌ Opp Unforced Error</button>
+              </div>
+
+              {/* Player 2 Options */}
+              <div style={{ background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.2)', borderRadius: 10, padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ fontWeight: 800, color: '#10b981', fontSize: 13, marginBottom: 4 }}>🟢 {match.player2_name}</div>
+                <button onClick={() => { handleAddPoint('player2', 'ace'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>🎯 Service Ace</button>
+                <button onClick={() => { handleAddPoint('player2', 'forehand_winner'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>⚡ Forehand Winner</button>
+                <button onClick={() => { handleAddPoint('player2', 'backhand_winner'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>💫 Backhand Winner</button>
+                <button onClick={() => { handleAddPoint('player2', 'volley_winner'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>🏐 Net Volley Winner</button>
+                <button onClick={() => { handleAddPoint('player2', 'opp_double_fault'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>⚠️ Opp Double Fault</button>
+                <button onClick={() => { handleAddPoint('player2', 'opp_unforced_error'); setShowAttributionSheet(false); }} className="btn" style={{ fontSize: 11, textAlign: 'left', background: 'var(--bg-secondary)' }}>❌ Opp Unforced Error</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Configuration Modal */}
+      {showConfigModal && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 10000, padding: 16
+        }}>
+          <div style={{
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-lg)', padding: 24, maxWidth: 380, width: '100%',
+            boxShadow: 'var(--glass-shadow)'
+          }}>
+            <h3 style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>⚙️ Configure Timeouts</h3>
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Max Timeouts (per team)</label>
+              <input 
+                type="number" min="1" max="5" 
+                value={maxTimeouts} 
+                onChange={e => setMaxTimeouts(Math.max(1, parseInt(e.target.value) || 2))}
+                className="input" style={{ width: '100%' }}
+              />
+            </div>
+            <div style={{ marginBottom: 18 }}>
+              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Timeout Scope</label>
+              <select 
+                value={timeoutScope} 
+                onChange={e => setTimeoutScope(e.target.value as 'set' | 'match')}
+                className="input" style={{ width: '100%' }}
+              >
+                <option value="set">Per Set (Default 2 per set)</option>
+                <option value="match">Per Entire Match</option>
+              </select>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button onClick={() => setShowConfigModal(false)} className="btn btn-primary" style={{ padding: '8px 16px', fontWeight: 700 }}>Done</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Completed Sets footer */}

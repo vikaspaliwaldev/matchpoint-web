@@ -225,6 +225,8 @@ export default function TournamentsPage() {
       setTournaments(prev => prev.map(t => t.id === selectedTournament.id ? { ...t, ...data } : t));
       setShowEditModal(false);
       setSelectedTournament(null);
+      setToast('Tournament updated successfully!');
+      setTimeout(() => setToast(null), 3000);
     } catch (err) {
       console.error('Failed to update tournament:', err);
       alert(err instanceof Error ? err.message : 'Failed to update tournament.');
@@ -620,6 +622,7 @@ export default function TournamentsPage() {
       {showCreateModal && (
         <CreateTournamentModal
           masterEvents={masterEvents}
+          defaultSport={activeSport}
           onClose={() => setShowCreateModal(false)}
           onCreate={handleCreate}
         />
@@ -630,6 +633,7 @@ export default function TournamentsPage() {
         <EditTournamentModal
           tournament={selectedTournament}
           masterEvents={masterEvents}
+          existingEvents={eventsMap[selectedTournament.id] || []}
           onClose={() => { setShowEditModal(false); setSelectedTournament(null); }}
           onUpdate={handleUpdateTournament}
         />
@@ -685,25 +689,27 @@ export default function TournamentsPage() {
 
 function CreateTournamentModal({
   masterEvents,
+  defaultSport,
   onClose,
   onCreate,
 }: {
   masterEvents: MasterEvent[];
+  defaultSport?: string;
   onClose: () => void;
   onCreate: (data: Partial<Tournament>) => Promise<boolean>;
 }) {
   const [step, setStep] = useState(1);
   const [name, setName] = useState('');
-  const [sport, setSport] = useState('badminton');
+  const [sport, setSport] = useState(defaultSport || 'cricket');
   const [description, setDescription] = useState('');
   const [location, setLocation] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
   const [ageCutoffDate, setAgeCutoffDate] = useState('');
   const [withdrawDate, setWithdrawDate] = useState('');
-  const [type, setType] = useState<'individual' | 'team'>('individual');
+  const [type, setType] = useState<'individual' | 'team'>('team');
   const [dateError, setDateError] = useState('');
-  const [teamSizeLimit, setTeamSizeLimit] = useState(6);
+  const [teamSizeLimit, setTeamSizeLimit] = useState(11);
   const [teamTieConfigs, setTeamTieConfigs] = useState<{ event_id: string; name: string; count: number }[]>([]);
   const [selectedMasterEventId, setSelectedMasterEventId] = useState('');
   const [subMatchCount, setSubMatchCount] = useState(1);
@@ -720,12 +726,35 @@ function CreateTournamentModal({
     { provider: 'mock', enabled: false }
   ]);
 
-  // Initialize selectedMasterEventId when masterEvents is loaded
+  // Cricket custom tournament rules
+  const [cricketOvers, setCricketOvers] = useState<number>(20);
+  const [cricketPowerplay, setCricketPowerplay] = useState<number>(6);
+  const [cricketMaxPerBowler, setCricketMaxPerBowler] = useState<number>(4);
+  const [cricketFreeHit, setCricketFreeHit] = useState<boolean>(true);
+  const [cricketBallType, setCricketBallType] = useState<'leather' | 'tennis' | 'tape' | 'rubber'>('tennis');
+  const [cricketPitchType, setCricketPitchType] = useState<'turf' | 'matting' | 'concrete' | 'ground'>('turf');
+  const [cricketWideRuns, setCricketWideRuns] = useState<number>(1);
+  const [cricketNoBallRuns, setCricketNoBallRuns] = useState<number>(1);
+  const [cricketOneTipOneHand, setCricketOneTipOneHand] = useState<boolean>(false);
+  const [cricketRoofDeadBall, setCricketRoofDeadBall] = useState<boolean>(false);
+
+  // Filter master events relevant to current sport
+  const relevantMasterEvents = masterEvents.filter(me => {
+    const eventSports = me.sports && me.sports.length > 0 ? me.sports : (me.sport ? [me.sport] : []);
+    if (eventSports.length === 0) return true; // generic
+    return eventSports.includes(sport);
+  });
+
+  const availableEventsForTie = relevantMasterEvents.length > 0 ? relevantMasterEvents : masterEvents;
+
+  // Initialize selectedMasterEventId when sport or masterEvents change
   useEffect(() => {
-    if (masterEvents && masterEvents.length > 0) {
-      setSelectedMasterEventId(masterEvents[0].id);
+    if (availableEventsForTie && availableEventsForTie.length > 0) {
+      if (!availableEventsForTie.some(e => e.id === selectedMasterEventId)) {
+        setSelectedMasterEventId(availableEventsForTie[0].id);
+      }
     }
-  }, [masterEvents]);
+  }, [availableEventsForTie, selectedMasterEventId, sport]);
 
   // Premium inline date validation
   useEffect(() => {
@@ -781,8 +810,20 @@ function CreateTournamentModal({
         team_size_limit: type === 'team' ? Number(teamSizeLimit) : undefined,
         team_tie_configs: type === 'team' ? teamTieConfigs : undefined,
         team_tie_events: type === 'team' ? flatTieEvents : undefined,
-        bonus_point_margin: type === 'team' ? Number(bonusPointMargin) : undefined,
-        bonus_point_value: type === 'team' ? Number(bonusPointValue) : undefined,
+        bonus_point_margin: type === 'team' && sport !== 'cricket' ? Number(bonusPointMargin) : undefined,
+        bonus_point_value: type === 'team' && sport !== 'cricket' ? Number(bonusPointValue) : undefined,
+        cricket_config: sport === 'cricket' ? {
+          overs_per_innings: Number(cricketOvers) || 20,
+          powerplay_overs: Number(cricketPowerplay) || 0,
+          max_overs_per_bowler: Number(cricketMaxPerBowler) || 4,
+          free_hit_on_no_ball: cricketFreeHit,
+          ball_type: cricketBallType,
+          pitch_type: cricketPitchType,
+          wide_runs: Number(cricketWideRuns) || 1,
+          no_ball_runs: Number(cricketNoBallRuns) || 1,
+          one_tip_one_hand: cricketOneTipOneHand,
+          roof_is_dead_ball: cricketRoofDeadBall,
+        } : undefined,
         collects_fees: collectsFees,
         entry_fee: collectsFees ? Number(entryFee) : 0,
         currency,
@@ -1039,38 +1080,189 @@ function CreateTournamentModal({
           {/* Step 4: Team Configurations */}
           {step === 4 && type === 'team' && (
             <div className="animate-slide-up" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: sport === 'cricket' ? '1fr 1fr' : '1fr 1fr', gap: 12 }}>
                 <div className="input-group">
-                  <label className="input-label" htmlFor="t-size">Team Roster Size Limit</label>
+                  <label className="input-label" htmlFor="t-size">
+                    {sport === 'cricket' ? '🏏 Playing XI / Squad Size Limit' : 'Team Roster Size Limit'}
+                  </label>
                   <input
                     id="t-size"
                     type="number"
                     className="input"
                     min="2"
-                    max="20"
+                    max="25"
                     value={teamSizeLimit}
                     onChange={e => setTeamSizeLimit(Number(e.target.value))}
                     required
                   />
                 </div>
-                <div className="input-group">
-                  <label className="input-label" htmlFor="t-bonus">Set Margin for Bonus Point</label>
-                  <input
-                    id="t-bonus"
-                    type="number"
-                    className="input"
-                    min="1"
-                    max="30"
-                    value={bonusPointMargin}
-                    onChange={e => setBonusPointMargin(Number(e.target.value))}
-                    required
-                  />
-                </div>
+                {sport !== 'cricket' ? (
+                  <div className="input-group">
+                    <label className="input-label" htmlFor="t-bonus">Set Margin for Bonus Point</label>
+                    <input
+                      id="t-bonus"
+                      type="number"
+                      className="input"
+                      min="1"
+                      max="30"
+                      value={bonusPointMargin}
+                      onChange={e => setBonusPointMargin(Number(e.target.value))}
+                      required
+                    />
+                  </div>
+                ) : (
+                  <div className="input-group">
+                    <label className="input-label" htmlFor="t-cric-overs">Overs per Innings *</label>
+                    <input
+                      id="t-cric-overs"
+                      type="number"
+                      className="input"
+                      min="1"
+                      max="50"
+                      value={cricketOvers}
+                      onChange={e => {
+                        const ov = Math.max(1, Number(e.target.value));
+                        setCricketOvers(ov);
+                        // Auto-calculate suggested powerplay & bowler quota
+                        if (ov === 20) {
+                          setCricketPowerplay(6);
+                          setCricketMaxPerBowler(4);
+                        } else if (ov === 10) {
+                          setCricketPowerplay(2);
+                          setCricketMaxPerBowler(2);
+                        } else if (ov <= 8) {
+                          setCricketPowerplay(1);
+                          setCricketMaxPerBowler(Math.max(1, Math.floor(ov / 4)));
+                        } else {
+                          setCricketPowerplay(Math.round(ov * 0.3));
+                          setCricketMaxPerBowler(Math.max(1, Math.ceil(ov / 5)));
+                        }
+                      }}
+                      required
+                    />
+                  </div>
+                )}
               </div>
+
+              {/* Cricket Custom Match Rules & Conditions (Only for Cricket) */}
+              {sport === 'cricket' && (
+                <div style={{
+                  background: 'var(--bg-secondary)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 12
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      ⚙️ Cricket Match & Powerplay Rules
+                    </span>
+                    <span style={{ fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>CricHeroes Style</span>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    <div className="input-group">
+                      <label className="input-label" style={{ fontSize: 11 }}>Powerplay Overs</label>
+                      <input
+                        type="number"
+                        className="input"
+                        min="0"
+                        max={cricketOvers}
+                        value={cricketPowerplay}
+                        onChange={e => setCricketPowerplay(Number(e.target.value))}
+                        placeholder="e.g. 6"
+                      />
+                    </div>
+                    <div className="input-group">
+                      <label className="input-label" style={{ fontSize: 11 }}>Max Overs / Bowler</label>
+                      <input
+                        type="number"
+                        className="input"
+                        min="1"
+                        max={cricketOvers}
+                        value={cricketMaxPerBowler}
+                        onChange={e => setCricketMaxPerBowler(Number(e.target.value))}
+                        placeholder="e.g. 4"
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    <div className="input-group">
+                      <label className="input-label" style={{ fontSize: 11 }}>Ball Type</label>
+                      <select
+                        className="input"
+                        value={cricketBallType}
+                        onChange={e => setCricketBallType(e.target.value as any)}
+                        style={{ height: 38 }}
+                      >
+                        <option value="tennis">🎾 Tennis Ball (Light/Heavy)</option>
+                        <option value="leather">🏏 Leather Ball (Red/White/Pink)</option>
+                        <option value="tape">⚪ Tape Ball</option>
+                        <option value="rubber">🔴 Rubber Ball</option>
+                      </select>
+                    </div>
+                    <div className="input-group">
+                      <label className="input-label" style={{ fontSize: 11 }}>Pitch / Ground Type</label>
+                      <select
+                        className="input"
+                        value={cricketPitchType}
+                        onChange={e => setCricketPitchType(e.target.value as any)}
+                        style={{ height: 38 }}
+                      >
+                        <option value="turf">🌿 Turf Pitch</option>
+                        <option value="matting">🟫 Matting Pitch</option>
+                        <option value="concrete">⬜ Concrete / Box Turf</option>
+                        <option value="ground">🌱 Natural Grass / Soil</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Toggles & Box cricket rules */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingTop: 4, borderTop: '1px solid var(--border)' }}>
+                    <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={cricketFreeHit}
+                          onChange={e => setCricketFreeHit(e.target.checked)}
+                          style={{ accentColor: 'var(--accent)' }}
+                        />
+                        Free Hit on No-Ball
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={cricketOneTipOneHand}
+                          onChange={e => setCricketOneTipOneHand(e.target.checked)}
+                          style={{ accentColor: 'var(--accent)' }}
+                        />
+                        One Tip One Hand Out (Turf/Box)
+                      </label>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={cricketRoofDeadBall}
+                          onChange={e => setCricketRoofDeadBall(e.target.checked)}
+                          style={{ accentColor: 'var(--accent)' }}
+                        />
+                        Roof Net = Dead Ball
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Dynamic event configuration panel from Master Events Table */}
               <div className="input-group" style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
-                <label className="input-label">Configure Tie Events (From Master Event Table) *</label>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <label className="input-label" style={{ marginBottom: 0 }}>Configure Tie Events (From Master Event Table) *</label>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    Filter: <strong>{sport.toUpperCase()}</strong>
+                  </span>
+                </div>
                 
                 <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 12 }}>
                   <div style={{ flex: 2 }}>
@@ -1081,7 +1273,7 @@ function CreateTournamentModal({
                       onChange={e => setSelectedMasterEventId(e.target.value)}
                       style={{ height: 42 }}
                     >
-                      {masterEvents.map(me => (
+                      {availableEventsForTie.map(me => (
                         <option key={me.id} value={me.id}>{me.name} ({me.category})</option>
                       ))}
                     </select>
@@ -1108,17 +1300,52 @@ function CreateTournamentModal({
                   </button>
                 </div>
 
+                {/* Quick Add Presets for Cricket */}
+                {sport === 'cricket' && teamTieConfigs.length === 0 && (
+                  <div style={{ marginBottom: 12, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Quick Add:</span>
+                    {availableEventsForTie.slice(0, 3).map(me => (
+                      <button
+                        key={me.id}
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        style={{ fontSize: 11, padding: '3px 8px', border: '1px solid var(--border)', background: 'var(--bg-elevated)' }}
+                        onClick={() => {
+                          setTeamTieConfigs(prev => {
+                            if (prev.some(c => c.event_id === me.id)) return prev;
+                            return [...prev, { event_id: me.id, name: me.name, count: 1 }];
+                          });
+                        }}
+                      >
+                        + 🏏 {me.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
                 {/* List of configured match formats */}
                 {teamTieConfigs.length === 0 ? (
-                  <div style={{ padding: '12px', border: '1px dashed var(--border)', borderRadius: 'var(--radius-sm)', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-                    No tie events configured yet. Configure events above.
+                  <div style={{
+                    padding: '14px',
+                    border: '1px dashed rgba(245, 158, 11, 0.4)',
+                    background: 'rgba(245, 158, 11, 0.05)',
+                    borderRadius: 'var(--radius-md)',
+                    textAlign: 'center',
+                    color: 'var(--text-secondary)',
+                    fontSize: 12,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 4
+                  }}>
+                    <span style={{ fontWeight: 600, color: '#f59e0b' }}>⚠️ No tie events added yet</span>
+                    <span>Please select an event above and click <strong>&quot;+ Add to Tie&quot;</strong> to enable tournament creation.</span>
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, background: 'var(--bg-secondary)', padding: 10, borderRadius: 'var(--radius-md)', maxHeight: 120, overflowY: 'auto' }}>
                     {teamTieConfigs.map(config => (
                       <div key={config.event_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-elevated)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
                         <span style={{ fontSize: 13, fontWeight: 600 }}>
-                          🏸 {config.name} <span style={{ color: 'var(--accent)', marginLeft: 8 }}>x {config.count} match{config.count !== 1 ? 'es' : ''}</span>
+                          {sport === 'cricket' ? '🏏' : sport === 'volleyball' ? '🏐' : sport === 'table_tennis' ? '🏓' : sport === 'tennis' ? '🥎' : '🏸'} {config.name} <span style={{ color: 'var(--accent)', marginLeft: 8 }}>x {config.count} match{config.count !== 1 ? 'es' : ''}</span>
                         </span>
                         <button
                           type="button"
@@ -1171,9 +1398,16 @@ function CreateTournamentModal({
             )}
 
             {step === 4 && type === 'team' && (
-              <button type="submit" className="btn btn-primary" disabled={teamTieConfigs.length === 0 || isSubmitting}>
-                {isSubmitting ? 'Creating...' : 'Create Tournament'}
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                {teamTieConfigs.length === 0 && (
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    Add at least 1 tie event to proceed
+                  </span>
+                )}
+                <button type="submit" className="btn btn-primary" disabled={teamTieConfigs.length === 0 || isSubmitting}>
+                  {isSubmitting ? 'Creating...' : 'Create Tournament'}
+                </button>
+              </div>
             )}
           </div>
         </form>
@@ -1612,11 +1846,13 @@ function AddEventModal({
 function EditTournamentModal({
   tournament,
   masterEvents,
+  existingEvents = [],
   onClose,
   onUpdate
 }: {
   tournament: Tournament;
   masterEvents: MasterEvent[];
+  existingEvents?: TournamentEvent[];
   onClose: () => void;
   onUpdate: (data: Partial<Tournament>) => void;
 }) {
@@ -1650,6 +1886,13 @@ function EditTournamentModal({
           count
         };
       });
+    }
+    if (existingEvents && existingEvents.length > 0) {
+      return existingEvents.map(e => ({
+        event_id: e.master_event_id || e.id,
+        name: e.event_name || 'Event',
+        count: 1
+      }));
     }
     return [];
   });
@@ -1697,12 +1940,28 @@ function EditTournamentModal({
     fetchProfiles();
   }, []);
 
-  // Initialize selectedMasterEventId when masterEvents is loaded
+  // Filter master events relevant to current tournament's sport
+  const relevantMasterEvents: MasterEvent[] = React.useMemo(() => {
+    return masterEvents.filter((me: MasterEvent) => {
+      const eventSports = me.sports && me.sports.length > 0 ? me.sports : (me.sport ? [me.sport] : []);
+      if (eventSports.length === 0) return true; // generic/any sport
+      return eventSports.includes(sport);
+    });
+  }, [masterEvents, sport]);
+
+  const availableEventsForTie: MasterEvent[] = relevantMasterEvents.length > 0 ? relevantMasterEvents : masterEvents;
+
+  // Initialize selectedMasterEventId when availableEventsForTie changes
   useEffect(() => {
-    if (masterEvents && masterEvents.length > 0) {
-      setSelectedMasterEventId(masterEvents[0].id);
+    if (availableEventsForTie && availableEventsForTie.length > 0) {
+      if (!availableEventsForTie.some((e: MasterEvent) => e.id === selectedMasterEventId)) {
+        // If there is already a configured tie event, select it first
+        const firstConfig = teamTieConfigs[0];
+        const matchInList = firstConfig && availableEventsForTie.find((e: MasterEvent) => e.id === firstConfig.event_id || e.name === firstConfig.name);
+        setSelectedMasterEventId(matchInList ? matchInList.id : availableEventsForTie[0].id);
+      }
     }
-  }, [masterEvents]);
+  }, [availableEventsForTie, selectedMasterEventId, teamTieConfigs]);
 
   useEffect(() => {
     if (startDate && endDate && endDate < startDate) {
@@ -1981,7 +2240,12 @@ function EditTournamentModal({
 
                   {/* Dynamic event configuration panel from Master Events Table */}
                   <div className="input-group" style={{ borderTop: '1px solid var(--border)', paddingTop: 14 }}>
-                    <label className="input-label">Configure Tie Events (From Master Event Table) *</label>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                      <label className="input-label" style={{ marginBottom: 0 }}>Configure Tie Events (From Master Event Table) *</label>
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        Filter: <strong>{sport.toUpperCase()}</strong>
+                      </span>
+                    </div>
                     
                     <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', marginBottom: 12 }}>
                       <div style={{ flex: 2 }}>
@@ -1992,7 +2256,7 @@ function EditTournamentModal({
                           onChange={e => setSelectedMasterEventId(e.target.value)}
                           style={{ height: 42 }}
                         >
-                          {masterEvents.map(me => (
+                          {availableEventsForTie.map(me => (
                             <option key={me.id} value={me.id}>{me.name} ({me.category})</option>
                           ))}
                         </select>
@@ -2029,7 +2293,7 @@ function EditTournamentModal({
                         {teamTieConfigs.map(config => (
                           <div key={config.event_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'var(--bg-elevated)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)' }}>
                             <span style={{ fontSize: 13, fontWeight: 600 }}>
-                              🏸 {config.name} <span style={{ color: 'var(--accent)', marginLeft: 8 }}>x {config.count} match{config.count !== 1 ? 'es' : ''}</span>
+                              {sport === 'cricket' ? '🏏' : sport === 'volleyball' ? '🏐' : '🏸'} {config.name} <span style={{ color: 'var(--accent)', marginLeft: 8 }}>x {config.count} match{config.count !== 1 ? 'es' : ''}</span>
                             </span>
                             <button
                               type="button"

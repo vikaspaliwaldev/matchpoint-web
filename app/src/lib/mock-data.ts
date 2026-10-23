@@ -39,6 +39,10 @@ export const mockMasterEvents: MasterEvent[] = [
   { id: 'vb_u19_boys', name: "Under-19 Boys Volleyball", event_type: 'team', category: 'junior', gender: 'Boys', min_age: 0, max_age: 19, sports: ['volleyball'] },
   { id: 'vb_u19_girls', name: "Under-19 Girls Volleyball", event_type: 'team', category: 'junior', gender: 'Girls', min_age: 0, max_age: 19, sports: ['volleyball'] },
   { id: 'vb_corp_open', name: "Corporate Volleyball Cup", event_type: 'team', category: 'open', gender: 'Open', min_age: 0, max_age: 100, sports: ['volleyball'] },
+  { id: 'cric_t20_open', name: "T20 Championship (20 Overs)", event_type: 'team', category: 'open', gender: 'Open', min_age: 0, max_age: 100, sports: ['cricket'] },
+  { id: 'cric_t10_cup', name: "T10 Super League (10 Overs)", event_type: 'team', category: 'open', gender: 'Open', min_age: 0, max_age: 100, sports: ['cricket'] },
+  { id: 'cric_box_turf', name: "Turf Box Cricket (8-a-side, 6 Overs)", event_type: 'team', category: 'open', gender: 'Open', min_age: 0, max_age: 100, sports: ['cricket'] },
+  { id: 'cric_corp_cup', name: "Corporate Cricket League", event_type: 'team', category: 'open', gender: 'Open', min_age: 0, max_age: 100, sports: ['cricket'] },
 ];
 
 // ---- Users ----
@@ -405,6 +409,8 @@ export const mockEvents: TournamentEvent[] = [
   { id: 'e6', tournament_id: 't2', master_event_id: 'ws_open', event_name: "Women's Singles", category: 'WS', entry_limit: 32, format: 'knockout', registrations_count: 20, scoring_format: '21-point', gender_restriction: 'women', age_limit: 0, age_restriction_type: 'max' },
   { id: 'e7', tournament_id: 't4', master_event_id: 'ms_open', event_name: "Men's Singles", category: 'MS', entry_limit: 16, format: 'knockout', registrations_count: 16, scoring_format: '21-point', gender_restriction: 'men', age_limit: 0, age_restriction_type: 'max' },
   { id: 'e8', tournament_id: 't3', master_event_id: 'team_open', event_name: "Team Event", category: 'TEAM', entry_limit: 8, format: 'league', registrations_count: 6, scoring_format: '21-point', gender_restriction: 'open', age_limit: 0, age_restriction_type: 'max' },
+  { id: 'e_7pd_vpl_league', tournament_id: 't_7pd_vpl_s2', master_event_id: 'team_open', event_name: "7PD VPL League Stage", category: 'TEAM', event_type: 'TEAM', gender: 'MALE', age_category: 'OPEN', entry_limit: 8, format: 'league', registrations_count: 6, scoring_format: '3-set', gender_restriction: 'men', age_limit: 0, age_restriction_type: 'max', sport: 'volleyball' },
+  { id: 'e_wvpl_league', tournament_id: 't_wvpl_2026', master_event_id: 'team_open', event_name: "WVPL 2026 League Stage", category: 'TEAM', event_type: 'TEAM', gender: 'FEMALE', age_category: 'OPEN', entry_limit: 8, format: 'league', registrations_count: 4, scoring_format: '3-set', gender_restriction: 'women', age_limit: 0, age_restriction_type: 'max', sport: 'volleyball' },
 ];
 
 // ---- Registrations ----

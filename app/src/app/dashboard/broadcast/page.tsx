@@ -3,13 +3,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { Match, Tournament, TournamentEvent } from '@/types';
-import { getMatches, getTournaments, getEvents, uploadMatchMedia } from '@/lib/supabase-service';
+import { Match, Tournament, TournamentEvent, Team } from '@/types';
+import { getMatches, getTournaments, getEvents, uploadMatchMedia, getAllTeams } from '@/lib/supabase-service';
 import { useAuth } from '@/lib/auth-context';
 import ShuttlecockLoader from '@/components/ShuttlecockLoader';
 import { IconShuttlecock } from '@/components/icons';
 import { useSport } from '@/lib/sport-context';
-import { formatTennisGameScore, getTableTennisServer } from '@/lib/sports-rules';
+import { formatTennisGameScore, getTableTennisServer, CricketMetadata, CricketInnings } from '@/lib/sports-rules';
+import { getTeamLogo, registerTeamLogo } from '@/lib/team-logos';
+
 export default function BroadcastStudioPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -22,9 +24,30 @@ export default function BroadcastStudioPage() {
   const [allMatches, setAllMatches] = useState<Match[]>([]);
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [events, setEvents] = useState<TournamentEvent[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedMatchId, setSelectedMatchId] = useState(initialMatchId);
   const [recordingOrientation, setRecordingOrientation] = useState<'portrait' | 'landscape'>('portrait');
+  const [overlayTheme, setOverlayTheme] = useState<'ipl' | 'icc' | 'classic'>('ipl');
+
+  // ── Automatic Fullscreen Scoreboard Overlay State & Event Detection ──
+  const [showFullScoreboard, setShowFullScoreboard] = useState(false);
+  const [fullScoreboardTitle, setFullScoreboardTitle] = useState('');
+  const [fullScoreboardCountdown, setFullScoreboardCountdown] = useState(0);
+  const fullScoreboardTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const fullScoreboardCountdownTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const showFullScoreboardRef = useRef(false);
+  const fullScoreboardTitleRef = useRef('');
+
+  // Keep track of previous cricket state to detect 4/6, wickets, over completion, and inning/match completion
+  const prevCricketStateRef = useRef<{
+    totalDeliveries: number;
+    ballsBowled: number;
+    wickets: number;
+    currentInnings: number;
+    matchStatus: string;
+    lastBallId?: string;
+  } | null>(null);
 
   // ── Camera State ──
   const [cameraActive, setCameraActive] = useState(false);
@@ -144,14 +167,23 @@ export default function BroadcastStudioPage() {
     async function load() {
       try {
         setLoading(true);
-        const [mats, tours, evs] = await Promise.all([
+        const [mats, tours, evs, tms] = await Promise.all([
           getMatches(),
           getTournaments(),
           getEvents(),
+          getAllTeams(),
         ]);
         setAllMatches(mats);
         setTournaments(tours);
         setEvents(evs);
+        setTeams(tms || []);
+
+        // Register logos for dynamic teams
+        (tms || []).forEach(team => {
+          if (team.name && team.logo_url) {
+            registerTeamLogo(team.name, team.logo_url);
+          }
+        });
       } catch (err) {
         console.error('Failed to load broadcast studio data:', err);
       } finally {
@@ -161,16 +193,63 @@ export default function BroadcastStudioPage() {
     load();
   }, []);
 
-  // ── Live score polling ──
+  // Trigger Fullscreen Scoreboard takeover for specified seconds
+  const triggerFullscreenScoreboard = useCallback((title: string, durationSec: number) => {
+    if (fullScoreboardTimerRef.current) clearTimeout(fullScoreboardTimerRef.current);
+    if (fullScoreboardCountdownTimerRef.current) clearInterval(fullScoreboardCountdownTimerRef.current);
+
+    setShowFullScoreboard(true);
+    setFullScoreboardTitle(title);
+    setFullScoreboardCountdown(durationSec);
+    showFullScoreboardRef.current = true;
+    fullScoreboardTitleRef.current = title;
+
+    fullScoreboardCountdownTimerRef.current = setInterval(() => {
+      setFullScoreboardCountdown(prev => {
+        if (prev <= 1) {
+          if (fullScoreboardCountdownTimerRef.current) clearInterval(fullScoreboardCountdownTimerRef.current);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    fullScoreboardTimerRef.current = setTimeout(() => {
+      setShowFullScoreboard(false);
+      showFullScoreboardRef.current = false;
+      if (fullScoreboardCountdownTimerRef.current) clearInterval(fullScoreboardCountdownTimerRef.current);
+    }, durationSec * 1000);
+  }, []);
+
+  // ── Live score polling & SSE stream for real-time responsiveness ──
   useEffect(() => {
     if (!selectedMatchId) return;
+
+    // SSE connection
+    let sseSource: EventSource | null = null;
+    try {
+      sseSource = new EventSource(`/api/v1/live/match/${selectedMatchId}`);
+      sseSource.addEventListener('match-update', (event: any) => {
+        try {
+          const updatedMatch = JSON.parse(event.data);
+          if (updatedMatch && updatedMatch.id === selectedMatchId) {
+            setAllMatches(prev => prev.map(m => m.id === selectedMatchId ? { ...m, ...updatedMatch } : m));
+          }
+        } catch {}
+      });
+    } catch {}
+
     const interval = setInterval(async () => {
       try {
         const mats = await getMatches();
         setAllMatches(mats);
       } catch {}
-    }, 3000);
-    return () => clearInterval(interval);
+    }, 2000);
+
+    return () => {
+      if (sseSource) sseSource.close();
+      clearInterval(interval);
+    };
   }, [selectedMatchId]);
 
   // Reset selected match if it doesn't match the new sport context
@@ -246,6 +325,70 @@ export default function BroadcastStudioPage() {
       currentSet: currentSet || null,
     };
   }, [selectedMatch, selectedTournament, selectedEvent, p1Sets, p2Sets, completedSets, currentSet]);
+
+  // ── Automatic Cricket Event Monitor for Fullscreen Scoreboard Takeover ──
+  useEffect(() => {
+    if (!selectedMatch || selectedMatch.sport !== 'cricket') return;
+    const cMeta = selectedMatch.sport_metadata as CricketMetadata | undefined;
+    if (!cMeta) return;
+
+    const currentInnNum = cMeta.current_innings || 1;
+    const inn = currentInnNum === 1 ? cMeta.innings_1 : (cMeta.innings_2 || cMeta.innings_1);
+    if (!inn) return;
+
+    const deliveries = inn.deliveries || [];
+    const totalDeliveries = deliveries.length;
+    const ballsBowled = inn.balls_bowled || 0;
+    const wickets = inn.wickets || 0;
+    const matchStatus = selectedMatch.status;
+    const lastBall = deliveries.length > 0 ? deliveries[deliveries.length - 1] : null;
+
+    const prev = prevCricketStateRef.current;
+    if (!prev) {
+      // First initialize
+      prevCricketStateRef.current = {
+        totalDeliveries,
+        ballsBowled,
+        wickets,
+        currentInnings: currentInnNum,
+        matchStatus,
+        lastBallId: lastBall?.id,
+      };
+      return;
+    }
+
+    // 1. Check Match Finish or Inning Finish (30 seconds display)
+    if (matchStatus === 'completed' && prev.matchStatus !== 'completed') {
+      triggerFullscreenScoreboard('MATCH COMPLETED', 30);
+    } else if (currentInnNum > prev.currentInnings) {
+      triggerFullscreenScoreboard('INNINGS BREAK / INNINGS FINISHED', 30);
+    }
+    // 2. Check Wicket / Player Out (12 seconds display)
+    else if (wickets > prev.wickets || (lastBall && lastBall.id !== prev.lastBallId && lastBall.is_wicket)) {
+      const wicketType = lastBall?.wicket_type ? ` (${lastBall.wicket_type.toUpperCase()})` : '';
+      triggerFullscreenScoreboard(`PLAYER OUT - WICKET!${wicketType}`, 12);
+    }
+    // 3. Check Over Finish (6 seconds display) - ballsBowled multiple of 6 and increased
+    else if (ballsBowled > prev.ballsBowled && ballsBowled % 6 === 0) {
+      const overNum = ballsBowled / 6;
+      triggerFullscreenScoreboard(`END OF OVER ${overNum}`, 6);
+    }
+    // 4. Check Boundary: 4 or 6 (6 seconds display)
+    else if (lastBall && lastBall.id !== prev.lastBallId && (lastBall.runs_off_bat === 4 || lastBall.runs_off_bat === 6)) {
+      const runText = lastBall.runs_off_bat === 6 ? '🚀 MAXIMUM 6 RUNS!' : '💥 FOUR! BOUNDARY';
+      triggerFullscreenScoreboard(runText, 6);
+    }
+
+    // Update ref
+    prevCricketStateRef.current = {
+      totalDeliveries,
+      ballsBowled,
+      wickets,
+      currentInnings: currentInnNum,
+      matchStatus,
+      lastBallId: lastBall?.id,
+    };
+  }, [selectedMatch, triggerFullscreenScoreboard]);
 
   // ── Camera ──
   const startCamera = useCallback(async (facing: 'user' | 'environment' = facingMode) => {
@@ -886,34 +1029,82 @@ export default function BroadcastStudioPage() {
         </div>
 
         {selectedMatch && (
-          <div>
-            <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 6 }}>
-              Recording Layout Orientation
-            </label>
-            <div className="tab-group" style={{ display: 'flex', width: '100%', gap: 2 }}>
-              <button
-                type="button"
-                className={`tab ${recordingOrientation === 'portrait' ? 'active' : ''}`}
-                onClick={() => setRecordingOrientation('portrait')}
-                style={{ flex: 1, textAlign: 'center' }}
-                disabled={isRecording}
-              >
-                📱 Portrait (9:16)
-              </button>
-              <button
-                type="button"
-                className={`tab ${recordingOrientation === 'landscape' ? 'active' : ''}`}
-                onClick={() => setRecordingOrientation('landscape')}
-                style={{ flex: 1, textAlign: 'center' }}
-                disabled={isRecording}
-              >
-                🖥️ Landscape (16:9)
-              </button>
+          <div style={{ display: 'grid', gridTemplateColumns: selectedMatch?.sport === 'cricket' ? '1fr 1fr' : '1fr', gap: 12 }}>
+            <div>
+              <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 6 }}>
+                Recording Layout Orientation
+              </label>
+              <div className="tab-group" style={{ display: 'flex', width: '100%', gap: 2 }}>
+                <button
+                  type="button"
+                  className={`tab ${recordingOrientation === 'portrait' ? 'active' : ''}`}
+                  onClick={() => setRecordingOrientation('portrait')}
+                  style={{ flex: 1, textAlign: 'center' }}
+                  disabled={isRecording}
+                >
+                  📱 Portrait (9:16)
+                </button>
+                <button
+                  type="button"
+                  className={`tab ${recordingOrientation === 'landscape' ? 'active' : ''}`}
+                  onClick={() => setRecordingOrientation('landscape')}
+                  style={{ flex: 1, textAlign: 'center' }}
+                  disabled={isRecording}
+                >
+                  🖥️ Landscape (16:9)
+                </button>
+              </div>
+              {isRecording && (
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block', textAlign: 'center' }}>
+                  ⚠️ Orientation locked while recording.
+                </span>
+              )}
             </div>
-            {isRecording && (
-              <span style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, display: 'block', textAlign: 'center' }}>
-                ⚠️ Orientation cannot be changed while recording.
-              </span>
+
+            {selectedMatch?.sport === 'cricket' && (
+              <div>
+                <label style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', display: 'block', marginBottom: 6 }}>
+                  Cricket Overlay Palette
+                </label>
+                <div className="tab-group" style={{ display: 'flex', width: '100%', gap: 2 }}>
+                  <button
+                    type="button"
+                    className={`tab ${overlayTheme === 'ipl' ? 'active' : ''}`}
+                    onClick={() => setOverlayTheme('ipl')}
+                    style={{
+                      flex: 1, textAlign: 'center', fontSize: 12,
+                      fontWeight: overlayTheme === 'ipl' ? 800 : 500,
+                      background: overlayTheme === 'ipl' ? 'linear-gradient(135deg, #1e1b4b, #312e81)' : undefined,
+                      color: overlayTheme === 'ipl' ? '#facc15' : undefined,
+                      borderColor: overlayTheme === 'ipl' ? '#eab308' : undefined,
+                    }}
+                  >
+                    ⚡ IPL Neon
+                  </button>
+                  <button
+                    type="button"
+                    className={`tab ${overlayTheme === 'icc' ? 'active' : ''}`}
+                    onClick={() => setOverlayTheme('icc')}
+                    style={{
+                      flex: 1, textAlign: 'center', fontSize: 12,
+                      fontWeight: overlayTheme === 'icc' ? 800 : 500,
+                      background: overlayTheme === 'icc' ? 'linear-gradient(135deg, #082f49, #0369a1)' : undefined,
+                      color: overlayTheme === 'icc' ? '#38bdf8' : undefined,
+                      borderColor: overlayTheme === 'icc' ? '#0284c7' : undefined,
+                    }}
+                  >
+                    🌐 ICC Blue
+                  </button>
+                  <button
+                    type="button"
+                    className={`tab ${overlayTheme === 'classic' ? 'active' : ''}`}
+                    onClick={() => setOverlayTheme('classic')}
+                    style={{ flex: 1, textAlign: 'center', fontSize: 12 }}
+                  >
+                    ⚪ Classic
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         )}
@@ -1010,14 +1201,651 @@ export default function BroadcastStudioPage() {
               </div>
             )}
 
-            {/* Score Overlay — always visible when match selected */}
+            {/* Fullscreen Scoreboard Overlay Takeover (Over finish, 4/6, Player Out, Inning/Match Finish) */}
+            {showFullScoreboard && selectedMatch && (
+              <div style={{
+                position: 'absolute',
+                inset: 0,
+                background: 'radial-gradient(ellipse at top, #0f172a 0%, #020617 100%)',
+                zIndex: 2000,
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'space-between',
+                padding: '20px 24px',
+                color: '#f8fafc',
+                overflowY: 'auto',
+                animation: 'fadeIn 0.3s ease',
+              }}>
+                {/* Scoreboard Takeover Header */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.15)', paddingBottom: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{
+                      background: fullScoreboardTitle.includes('WICKET') || fullScoreboardTitle.includes('OUT')
+                        ? '#dc2626'
+                        : fullScoreboardTitle.includes('6')
+                        ? '#7c3aed'
+                        : fullScoreboardTitle.includes('FOUR')
+                        ? '#059669'
+                        : '#ea580c',
+                      color: '#fff',
+                      padding: '4px 12px',
+                      borderRadius: 6,
+                      fontSize: 12,
+                      fontWeight: 900,
+                      letterSpacing: 1,
+                      textTransform: 'uppercase',
+                    }}>
+                      ⚡ {fullScoreboardTitle}
+                    </span>
+                    <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 700 }}>
+                      {selectedTournament?.name || 'Tournament'} · {selectedMatch.court || 'Center Court'}
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 11, color: '#94a3b8' }}>Camera resumes in:</span>
+                    <span style={{
+                      background: 'rgba(56, 189, 248, 0.2)',
+                      color: '#38bdf8',
+                      border: '1px solid #38bdf8',
+                      padding: '2px 8px',
+                      borderRadius: 12,
+                      fontSize: 12,
+                      fontWeight: 800,
+                      fontFamily: 'monospace'
+                    }}>
+                      {fullScoreboardCountdown}s
+                    </span>
+                    <button
+                      onClick={() => setShowFullScoreboard(false)}
+                      style={{
+                        background: 'rgba(255,255,255,0.1)',
+                        border: 'none',
+                        color: '#fff',
+                        borderRadius: 4,
+                        padding: '4px 8px',
+                        fontSize: 11,
+                        cursor: 'pointer',
+                        fontWeight: 700,
+                        marginLeft: 6,
+                      }}
+                      title="Skip and resume camera"
+                    >
+                      Resume Camera ✕
+                    </button>
+                  </div>
+                </div>
+
+                {/* Scoreboard Takeover Main Score & Players */}
+                {selectedMatch.sport === 'cricket' ? (() => {
+                  const cMeta = (selectedMatch.sport_metadata || {}) as CricketMetadata;
+                  const currentInnNum = cMeta.current_innings || 1;
+                  const inn1 = cMeta.innings_1;
+                  const inn2 = cMeta.innings_2;
+                  const inn: CricketInnings = currentInnNum === 1 ? (inn1 || ({} as any)) : (inn2 || inn1 || ({} as any));
+                  const battingTeamName = inn.batting_team_name || selectedMatch.player1_name;
+                  const bowlingTeamName = inn.bowling_team_name || selectedMatch.player2_name;
+                  const totalRuns = inn.total_runs ?? 0;
+                  const wickets = inn.wickets ?? 0;
+                  const oversFormatted = inn.overs_formatted || '0.0';
+                  const maxOvers = inn.max_overs || 20;
+
+                  const target = inn.target_runs;
+                  const ballsRemaining = Math.max(0, (maxOvers * 6) - (inn.balls_bowled || 0));
+                  const runsNeeded = target ? Math.max(0, target - totalRuns) : 0;
+                  const crr = inn.balls_bowled > 0 ? (totalRuns / (inn.balls_bowled / 6)).toFixed(2) : '0.00';
+                  const rrr = currentInnNum === 2 && target && ballsRemaining > 0 ? ((runsNeeded / ballsRemaining) * 6).toFixed(2) : '0.00';
+
+                  const deliveries = inn.deliveries || [];
+                  const lastDeliveries = deliveries.slice(-10);
+                  const battersList = Object.values(inn.batters || {});
+                  const bowlersList = Object.values(inn.bowlers || {});
+
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, margin: '10px 0', overflowY: 'auto' }}>
+                      {/* Big Score Header Banner */}
+                      <div style={{
+                        background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.95) 0%, rgba(15, 23, 42, 0.95) 100%)',
+                        border: '1.5px solid #ea580c',
+                        borderRadius: 12,
+                        padding: '12px 18px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: 12,
+                        boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                      }}>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 900, color: '#ea580c', textTransform: 'uppercase', letterSpacing: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
+                            🏏 {battingTeamName} · Innings {currentInnNum}
+                            {inn1 && inn2 && (
+                              <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>
+                                (1st: {inn1.batting_team_name} {inn1.total_runs}/{inn1.wickets})
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 4 }}>
+                            <span style={{ fontSize: 'clamp(32px, 4.5vw, 48px)', fontWeight: 900, fontFamily: 'monospace', color: '#38bdf8', lineHeight: 1 }}>
+                              {totalRuns}/{wickets}
+                            </span>
+                            <span style={{ fontSize: 16, fontWeight: 800, color: '#ffffff' }}>
+                              ({oversFormatted} / {maxOvers} ov)
+                            </span>
+                          </div>
+                          {target && currentInnNum === 2 && (
+                            <div style={{ fontSize: 13, fontWeight: 800, color: '#facc15', marginTop: 4 }}>
+                              🎯 Target: {target} (Need {runsNeeded} runs in {ballsRemaining} balls)
+                            </div>
+                          )}
+                        </div>
+
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontSize: 13, fontWeight: 800, color: '#38bdf8' }}>
+                            CRR: {crr} {currentInnNum === 2 && target && `· RRR: ${rrr}`}
+                          </div>
+                          <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 3 }}>
+                            Bowling: <strong style={{ color: '#fff' }}>{bowlingTeamName}</strong>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Batting & Bowling Complete Tables Grid */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
+                        {/* 1. Complete Batting Scorecard Table */}
+                        <div style={{
+                          background: 'rgba(255,255,255,0.03)',
+                          border: '1px solid rgba(255,255,255,0.1)',
+                          borderRadius: 10,
+                          overflow: 'hidden',
+                        }}>
+                          <div style={{
+                            padding: '8px 12px',
+                            background: 'rgba(255,255,255,0.06)',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: '#38bdf8',
+                            textTransform: 'uppercase',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                          }}>
+                            <span>Batting — {battingTeamName}</span>
+                            <div style={{ display: 'flex', gap: 12, fontFamily: 'monospace' }}>
+                              <span style={{ width: 24, textAlign: 'right' }}>R</span>
+                              <span style={{ width: 24, textAlign: 'right' }}>B</span>
+                              <span style={{ width: 20, textAlign: 'right' }}>4s</span>
+                              <span style={{ width: 20, textAlign: 'right' }}>6s</span>
+                              <span style={{ width: 36, textAlign: 'right' }}>SR</span>
+                            </div>
+                          </div>
+
+                          <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+                            {battersList.length === 0 ? (
+                              <div style={{ padding: 12, fontSize: 12, color: '#64748b', textAlign: 'center' }}>No batters yet</div>
+                            ) : (
+                              battersList.map((b, i) => (
+                                <div
+                                  key={i}
+                                  style={{
+                                    padding: '6px 12px',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    borderTop: i > 0 ? '1px solid rgba(255,255,255,0.04)' : 'none',
+                                    background: !b.is_out ? 'rgba(56, 189, 248, 0.05)' : 'transparent',
+                                  }}
+                                >
+                                  <div style={{ maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                                      <span style={{ fontSize: 12, fontWeight: 700, color: b.is_out ? '#cbd5e1' : '#60a5fa' }}>
+                                        {b.player_name} {!b.is_out && '*'}
+                                      </span>
+                                    </div>
+                                    <div style={{ fontSize: 10, color: '#64748b' }}>
+                                      {b.is_out ? (b.dismissal_text || 'out') : 'not out'}
+                                    </div>
+                                  </div>
+                                  <div style={{ display: 'flex', gap: 12, fontFamily: 'monospace', fontWeight: 700, fontSize: 12 }}>
+                                    <span style={{ width: 24, textAlign: 'right', color: '#f8fafc', fontWeight: 800 }}>{b.runs}</span>
+                                    <span style={{ width: 24, textAlign: 'right', color: '#94a3b8' }}>{b.balls_faced}</span>
+                                    <span style={{ width: 20, textAlign: 'right', color: '#94a3b8' }}>{b.fours || 0}</span>
+                                    <span style={{ width: 20, textAlign: 'right', color: '#94a3b8' }}>{b.sixes || 0}</span>
+                                    <span style={{ width: 36, textAlign: 'right', color: '#38bdf8' }}>{b.strike_rate ? b.strike_rate.toFixed(1) : '0.0'}</span>
+                                  </div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+
+                          {/* Extras & Total Row */}
+                          <div style={{
+                            padding: '6px 12px',
+                            background: 'rgba(255,255,255,0.03)',
+                            borderTop: '1px solid rgba(255,255,255,0.08)',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            fontSize: 11,
+                            color: '#94a3b8',
+                          }}>
+                            <span>Extras (wd {inn.extras?.wides || 0}, nb {inn.extras?.no_balls || 0}, b {inn.extras?.byes || 0}, lb {inn.extras?.leg_byes || 0})</span>
+                            <strong style={{ color: '#f8fafc', fontFamily: 'monospace' }}>{inn.extras?.total || 0}</strong>
+                          </div>
+                        </div>
+
+                        {/* 2. Complete Bowling Scorecard Table */}
+                        <div style={{
+                          background: 'rgba(255,255,255,0.03)',
+                          border: '1px solid rgba(255,255,255,0.1)',
+                          borderRadius: 10,
+                          overflow: 'hidden',
+                        }}>
+                          <div style={{
+                            padding: '8px 12px',
+                            background: 'rgba(255,255,255,0.06)',
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: '#34d399',
+                            textTransform: 'uppercase',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                          }}>
+                            <span>Bowling — {bowlingTeamName}</span>
+                            <div style={{ display: 'flex', gap: 12, fontFamily: 'monospace' }}>
+                              <span style={{ width: 24, textAlign: 'right' }}>O</span>
+                              <span style={{ width: 20, textAlign: 'right' }}>M</span>
+                              <span style={{ width: 24, textAlign: 'right' }}>R</span>
+                              <span style={{ width: 20, textAlign: 'right' }}>W</span>
+                              <span style={{ width: 36, textAlign: 'right' }}>ECON</span>
+                            </div>
+                          </div>
+
+                          <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+                            {bowlersList.length === 0 ? (
+                              <div style={{ padding: 12, fontSize: 12, color: '#64748b', textAlign: 'center' }}>No bowling figures yet</div>
+                            ) : (
+                              bowlersList.map((bw, i) => (
+                                <div
+                                  key={i}
+                                  style={{
+                                    padding: '6px 12px',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    borderTop: i > 0 ? '1px solid rgba(255,255,255,0.04)' : 'none',
+                                    background: bw.player_name === cMeta.bowler_name ? 'rgba(52, 211, 153, 0.06)' : 'transparent',
+                                  }}
+                                >
+                                  <span style={{ fontSize: 12, fontWeight: 700, color: bw.player_name === cMeta.bowler_name ? '#34d399' : '#f8fafc', maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {bw.player_name === cMeta.bowler_name ? `🔴 ${bw.player_name}` : bw.player_name}
+                                  </span>
+                                  <div style={{ display: 'flex', gap: 12, fontFamily: 'monospace', fontWeight: 700, fontSize: 12 }}>
+                                    <span style={{ width: 24, textAlign: 'right', color: '#f8fafc' }}>{bw.overs}</span>
+                                    <span style={{ width: 20, textAlign: 'right', color: '#94a3b8' }}>{bw.maidens || 0}</span>
+                                    <span style={{ width: 24, textAlign: 'right', color: '#f8fafc' }}>{bw.runs_conceded}</span>
+                                    <span style={{ width: 20, textAlign: 'right', color: '#34d399', fontWeight: 800 }}>{bw.wickets}</span>
+                                    <span style={{ width: 36, textAlign: 'right', color: '#38bdf8' }}>{bw.economy ? bw.economy.toFixed(2) : '0.00'}</span>
+                                  </div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+
+                          {/* Fall of Wickets (FOW) */}
+                          {inn.fall_of_wickets && inn.fall_of_wickets.length > 0 && (
+                            <div style={{
+                              padding: '6px 12px',
+                              background: 'rgba(239, 68, 68, 0.05)',
+                              borderTop: '1px solid rgba(239, 68, 68, 0.2)',
+                              fontSize: 10,
+                              color: '#cbd5e1',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 6,
+                              overflowX: 'auto',
+                            }}>
+                              <span style={{ color: '#ef4444', fontWeight: 800, textTransform: 'uppercase', whiteSpace: 'nowrap' }}>FOW:</span>
+                              {inn.fall_of_wickets.map((fow, i) => (
+                                <span key={i} style={{ background: 'rgba(255,255,255,0.06)', padding: '1px 5px', borderRadius: 4, whiteSpace: 'nowrap' }}>
+                                  {fow.runs}/{fow.wicket_number} ({fow.player_name})
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Recent Deliveries Ball History Ribbon */}
+                      <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 10, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8, overflowX: 'auto' }}>
+                        <span style={{ fontSize: 10, fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Recent Deliveries:</span>
+                        {lastDeliveries.length === 0 ? (
+                          <span style={{ fontSize: 11, color: '#64748b' }}>No deliveries yet</span>
+                        ) : (
+                          lastDeliveries.map((b, i) => {
+                            const isW = b.is_wicket;
+                            const isSix = b.runs_off_bat === 6;
+                            const isFour = b.runs_off_bat === 4;
+                            const isExtra = !b.is_legal;
+                            const bg = isW ? '#ef4444' : isSix ? '#8b5cf6' : isFour ? '#10b981' : isExtra ? '#ea580c' : 'rgba(255,255,255,0.15)';
+                            const label = isW ? (b.extra_type ? `1w` : 'W') : b.extra_type ? `${b.total_runs}${b.extra_type === 'wide' ? 'w' : 'n'}` : `${b.runs_off_bat}`;
+                            return (
+                              <div key={i} style={{ minWidth: 24, height: 24, borderRadius: 12, background: bg, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 900, flexShrink: 0 }}>
+                                {label}
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  );
+                })() : (
+                  <div style={{ textAlign: 'center', padding: '40px 0' }}>
+                    <div style={{ fontSize: 32, fontWeight: 800 }}>{selectedMatch.player1_name} vs {selectedMatch.player2_name}</div>
+                    <div style={{ fontSize: 24, marginTop: 8, color: '#38bdf8' }}>Match in Progress</div>
+                  </div>
+                )}
+
+                <div style={{ textAlign: 'center', fontSize: 11, color: '#64748b', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
+                  MatchPoint TV • Live Complete Scoreboard Takeover
+                </div>
+              </div>
+            )}
+
+            {/* Score Overlay — Attached Table Design (Logo/Team | Total/Overs | Batter 1 & 2 | Bowler | Over Balls) */}
             <div style={{
-              position: 'absolute', bottom: 0, left: 0, right: 0,
-              background: 'linear-gradient(to top, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.6) 70%, transparent 100%)',
-              padding: (isFullscreen && recordingOrientation === 'landscape') ? '12px 24px' : '20px 16px 14px 16px',
+              position: 'absolute', bottom: 12, left: 16, right: 16,
               zIndex: 999,
+              display: showFullScoreboard ? 'none' : 'block',
             }}>
-              {recordingOrientation === 'landscape' ? (
+              {selectedMatch.sport === 'cricket' ? (() => {
+                const cMeta = (selectedMatch.sport_metadata || {}) as CricketMetadata;
+                const currentInnNum = cMeta.current_innings || 1;
+                const inn: CricketInnings = currentInnNum === 1 ? (cMeta.innings_1 || ({} as any)) : (cMeta.innings_2 || cMeta.innings_1 || ({} as any));
+                const battingTeamName = inn.batting_team_name || selectedMatch.player1_name;
+                const totalRuns = inn.total_runs ?? 0;
+                const wickets = inn.wickets ?? 0;
+                const oversFormatted = inn.overs_formatted || '0.0';
+                const maxOvers = inn.max_overs || 20;
+
+                const striker = inn.batters?.[cMeta.striker_id] || { player_name: cMeta.striker_name || 'Player2', runs: 0, balls_faced: 0 };
+                const nonStriker = inn.batters?.[cMeta.non_striker_id] || { player_name: cMeta.non_striker_name || 'Player1', runs: 0, balls_faced: 0 };
+                const bowler = inn.bowlers?.[cMeta.bowler_id] || { player_name: cMeta.bowler_name || "Bowler's Name", overs: 0, runs_conceded: 0, wickets: 0 };
+
+                const deliveries = inn.deliveries || [];
+                const lastBalls = deliveries.slice(-6);
+                // Resolve team logo and clean short code
+                const matchedTeam = teams.find(
+                  t => t.name.toLowerCase() === battingTeamName.toLowerCase() ||
+                       (t.id && (t.id === selectedMatch.player1_id || t.id === selectedMatch.player2_id))
+                );
+                const teamLogo = matchedTeam?.logo_url || getTeamLogo(battingTeamName) || getTeamLogo(selectedMatch.player1_name);
+                const teamShort = matchedTeam?.short_name || (
+                  battingTeamName.length > 6 
+                    ? battingTeamName.split(' ').map(w => w[0]).join('').substring(0, 4).toUpperCase()
+                    : battingTeamName.toUpperCase()
+                );
+
+                // Theme palette styling for modern ICC / IPL broadcast aesthetics
+                const isIcc = overlayTheme === 'icc';
+                const isClassic = overlayTheme === 'classic';
+                const isIpl = !isIcc && !isClassic;
+
+                const tableContainerBg = isIpl 
+                  ? 'linear-gradient(135deg, rgba(15, 23, 42, 0.98) 0%, rgba(30, 41, 59, 0.96) 100%)'
+                  : isIcc 
+                  ? 'linear-gradient(135deg, rgba(10, 25, 60, 0.98) 0%, rgba(20, 45, 95, 0.96) 100%)'
+                  : '#ffffff';
+
+                const tableBorder = isIpl
+                  ? '1.5px solid rgba(249, 115, 22, 0.5)'
+                  : isIcc
+                  ? '1.5px solid rgba(56, 189, 248, 0.5)'
+                  : '1px solid #000000';
+
+                const cellBorder = isIpl || isIcc ? '1px solid rgba(255, 255, 255, 0.12)' : '1px solid #d1d5db';
+                const textPrimary = isIpl || isIcc ? '#f8fafc' : '#0f172a';
+                const textSecondary = isIpl || isIcc ? '#94a3b8' : '#334155';
+                const scoreColor = isIpl ? '#facc15' : isIcc ? '#38bdf8' : '#000000';
+                const logoCellBg = isIpl 
+                  ? 'linear-gradient(180deg, #ea580c 0%, #c2410c 100%)'
+                  : isIcc
+                  ? 'linear-gradient(180deg, #0284c7 0%, #0369a1 100%)'
+                  : '#f8fafc';
+
+                return (
+                  <div style={{
+                    width: '100%',
+                    background: tableContainerBg,
+                    color: textPrimary,
+                    border: tableBorder,
+                    borderRadius: 4,
+                    boxShadow: '0 8px 30px rgba(0,0,0,0.7)',
+                    fontFamily: 'Inter, system-ui, -apple-system, sans-serif',
+                    overflow: 'hidden',
+                    backdropFilter: 'blur(10px)',
+                  }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }}>
+                      <tbody>
+                        {/* Row 1: Logo/Team Title | Score | Batter 1 (Non-striker) | Bowler Name */}
+                        <tr style={{ borderBottom: cellBorder, height: 26 }}>
+                          {/* Col 1: Logo or Team Short (Rowspan 2) */}
+                          <td rowSpan={2} style={{
+                            width: 76,
+                            minWidth: 68,
+                            padding: '2px 6px',
+                            borderRight: cellBorder,
+                            textAlign: 'center',
+                            verticalAlign: 'middle',
+                            background: logoCellBg,
+                            color: '#ffffff',
+                          }}>
+                            {teamLogo ? (
+                              <img
+                                src={teamLogo}
+                                alt={battingTeamName}
+                                style={{ height: 20, maxWidth: 36, objectFit: 'contain', display: 'block', margin: '0 auto 2px' }}
+                              />
+                            ) : (
+                              <div style={{
+                                width: 22,
+                                height: 22,
+                                borderRadius: '50%',
+                                background: matchedTeam?.logo_color || (isIpl ? '#f97316' : '#0284c7'),
+                                color: '#ffffff',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: 10,
+                                fontWeight: 900,
+                                margin: '0 auto 2px',
+                                border: '1px solid rgba(255,255,255,0.4)',
+                              }}>
+                                {teamShort.charAt(0) || 'T'}
+                              </div>
+                            )}
+                            <div style={{
+                              fontWeight: 900,
+                              fontSize: 10,
+                              color: '#ffffff',
+                              textTransform: 'uppercase',
+                              lineHeight: 1,
+                              letterSpacing: 0.5,
+                              textShadow: '0 1px 2px rgba(0,0,0,0.5)',
+                            }}>
+                              {teamShort}
+                            </div>
+                          </td>
+
+                          {/* Col 2: Score 14/1 */}
+                          <td style={{
+                            width: 72,
+                            minWidth: 64,
+                            padding: '2px 6px',
+                            borderRight: cellBorder,
+                            textAlign: 'center',
+                            fontWeight: 900,
+                            fontSize: 14,
+                            fontFamily: 'monospace',
+                            color: scoreColor,
+                            whiteSpace: 'nowrap',
+                            background: isIpl ? 'rgba(250, 204, 21, 0.08)' : isIcc ? 'rgba(56, 189, 248, 0.08)' : 'transparent',
+                          }}>
+                            {totalRuns}/{wickets}
+                          </td>
+
+                          {/* Col 3: Batter 1 Name */}
+                          <td style={{
+                            padding: '2px 8px',
+                            fontWeight: 700,
+                            fontSize: 11,
+                            color: textPrimary,
+                            borderRight: cellBorder,
+                            whiteSpace: 'nowrap',
+                            maxWidth: 130,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}>
+                            {nonStriker.player_name}
+                          </td>
+
+                          {/* Col 4: Batter 1 Runs (Balls) */}
+                          <td style={{
+                            padding: '2px 8px',
+                            fontWeight: 700,
+                            fontSize: 11,
+                            color: textSecondary,
+                            borderRight: cellBorder,
+                            whiteSpace: 'nowrap',
+                            textAlign: 'left',
+                          }}>
+                            {String(nonStriker.runs).padStart(2, '0')} ({nonStriker.balls_faced} Balls)
+                          </td>
+
+                          {/* Col 5: Bowler's Name */}
+                          <td style={{
+                            padding: '2px 8px',
+                            fontWeight: 700,
+                            fontSize: 11,
+                            color: textPrimary,
+                            borderRight: cellBorder,
+                            whiteSpace: 'nowrap',
+                            maxWidth: 130,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}>
+                            <span style={{ color: isIpl ? '#f87171' : isIcc ? '#38bdf8' : '#ef4444', marginRight: 4 }}>🔴</span>
+                            {bowler.player_name}
+                          </td>
+
+                          {/* Col 6: Bowler Figures (e.g. 2/12 (2.3 Overs)) */}
+                          <td style={{
+                            padding: '2px 8px',
+                            fontWeight: 700,
+                            fontSize: 11,
+                            color: textSecondary,
+                            whiteSpace: 'nowrap',
+                            textAlign: 'left',
+                          }}>
+                            {bowler.wickets}/{bowler.runs_conceded} ({bowler.overs} Overs)
+                          </td>
+                        </tr>
+
+                        {/* Row 2: Overs | Batter 2* (Striker) | Over balls ribbon */}
+                        <tr style={{ height: 26, background: isIpl || isIcc ? 'rgba(255,255,255,0.02)' : '#ffffff' }}>
+                          {/* Col 2: Overs (1.4/5 ov) */}
+                          <td style={{
+                            padding: '2px 6px',
+                            borderRight: cellBorder,
+                            textAlign: 'center',
+                            fontWeight: 700,
+                            fontSize: 10,
+                            color: textSecondary,
+                            whiteSpace: 'nowrap',
+                          }}>
+                            ({oversFormatted}/{maxOvers} ov)
+                          </td>
+
+                          {/* Col 3: Batter 2 Name with Striker * */}
+                          <td style={{
+                            padding: '2px 8px',
+                            fontWeight: 800,
+                            fontSize: 11,
+                            color: isIpl ? '#38bdf8' : isIcc ? '#67e8f9' : '#0f172a',
+                            borderRight: cellBorder,
+                            whiteSpace: 'nowrap',
+                            maxWidth: 130,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}>
+                            🏏 {striker.player_name}*
+                          </td>
+
+                          {/* Col 4: Batter 2 Runs (Balls) */}
+                          <td style={{
+                            padding: '2px 8px',
+                            fontWeight: 800,
+                            fontSize: 11,
+                            color: textPrimary,
+                            borderRight: cellBorder,
+                            whiteSpace: 'nowrap',
+                            textAlign: 'left',
+                          }}>
+                            {String(striker.runs).padStart(2, '0')} ({striker.balls_faced} Balls)
+                          </td>
+
+                          {/* Col 5 & 6 combined: O: Balls Ribbon */}
+                          <td colSpan={2} style={{
+                            padding: '2px 8px',
+                            background: isIpl ? 'rgba(0, 0, 0, 0.45)' : isIcc ? 'rgba(3, 15, 38, 0.7)' : '#0f172a',
+                            color: '#ffffff',
+                            textAlign: 'left',
+                            verticalAlign: 'middle',
+                            whiteSpace: 'nowrap',
+                          }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                              <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: 0.5, color: '#94a3b8' }}>
+                                O:
+                              </span>
+                              {lastBalls.length === 0 ? (
+                                <span style={{ fontSize: 10, color: '#64748b' }}>-</span>
+                              ) : (
+                                lastBalls.map((b, i) => {
+                                  const isW = b.is_wicket;
+                                  const isSix = b.runs_off_bat === 6;
+                                  const isFour = b.runs_off_bat === 4;
+                                  const isExtra = !b.is_legal;
+                                  const bg = isW ? '#ef4444' : isExtra ? '#ea580c' : isSix ? '#8b5cf6' : isFour ? '#10b981' : '#334155';
+                                  const label = isW ? (b.extra_type ? `1w` : 'W') : b.extra_type ? `${b.total_runs}${b.extra_type === 'wide' ? 'w' : 'n'}` : `${b.runs_off_bat}`;
+                                  return (
+                                    <div
+                                      key={i}
+                                      style={{
+                                        width: 16,
+                                        height: 16,
+                                        borderRadius: '50%',
+                                        background: bg,
+                                        color: '#ffffff',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        fontSize: 8.5,
+                                        fontWeight: 900,
+                                        flexShrink: 0,
+                                        boxShadow: isSix || isFour || isW ? '0 0 6px rgba(255,255,255,0.4)' : 'none',
+                                      }}
+                                    >
+                                      {label}
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })() : recordingOrientation === 'landscape' ? (
                 // Horizontal Ticker Scoreboard for Landscape Broadcast (saves vertical space)
                 <div style={{ display: 'flex', width: '100%', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
                   {/* Left: Tournament/Event */}
@@ -1344,23 +2172,111 @@ export default function BroadcastStudioPage() {
             )}
           </div>
 
-          {/* ── YouTube URL Section ── */}
-          <div style={{ padding: '16px 16px 12px 16px', borderBottom: '1px solid var(--border)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-              <span style={{ fontSize: 16 }}>▶️</span>
-              <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>YouTube Live Stream URL</span>
-              <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 4 }}>
-                (share so fans can find your stream)
+          {/* ── Admin 1-Click Live Streaming & YouTube Ingest Section ── */}
+          <div style={{
+            padding: '16px',
+            borderBottom: '1px solid var(--border)',
+            background: (user?.role === 'admin' || user?.role === 'system_admin' || user?.roles?.includes('admin'))
+              ? 'linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(244, 63, 94, 0.04))'
+              : undefined,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: 18 }}>🔴</span>
+                <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--text-primary)' }}>
+                  Live Streaming to YouTube
+                </span>
+                {(user?.role === 'admin' || user?.role === 'system_admin' || user?.roles?.includes('admin')) && (
+                  <span style={{
+                    fontSize: 10,
+                    fontWeight: 800,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.06em',
+                    background: 'linear-gradient(135deg, #ef4444, #dc2626)',
+                    color: '#fff',
+                    padding: '2px 7px',
+                    borderRadius: 999,
+                  }}>
+                    Admin 1-Click
+                  </span>
+                )}
+              </div>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                RTMP / Studio Ready
               </span>
             </div>
-            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10, lineHeight: 1.5 }}>
-              Start your YouTube Live stream separately, then paste the public URL below. It will appear on the match watch page for all viewers.
+
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+              {(user?.role === 'admin' || user?.role === 'system_admin' || user?.roles?.includes('admin'))
+                ? 'As Admin, launch your YouTube Live Studio broadcast in 1 click or paste the match watch URL so viewers can tune in directly with full scoreboard overlays.'
+                : 'Start your YouTube Live stream, then paste the public URL below. It will automatically attach to the match for all online spectators.'}
             </p>
+
+            {/* Admin Quick Action Hub */}
+            {(user?.role === 'admin' || user?.role === 'system_admin' || user?.roles?.includes('admin')) && (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                gap: 8,
+                marginBottom: 12,
+                padding: '10px 12px',
+                borderRadius: 'var(--radius-md)',
+                background: 'var(--bg-secondary)',
+                border: '1px solid rgba(239, 68, 68, 0.2)',
+              }}>
+                <a
+                  href="https://studio.youtube.com/channel/UC/livestreaming/stream"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8,
+                    padding: '8px 12px',
+                    borderRadius: 'var(--radius-md)',
+                    background: 'linear-gradient(135deg, #ef4444, #b91c1c)',
+                    color: '#fff',
+                    fontSize: 12,
+                    fontWeight: 700,
+                    textDecoration: 'none',
+                    boxShadow: '0 2px 8px rgba(239, 68, 68, 0.25)',
+                  }}
+                >
+                  <span>📺</span> Open YouTube Live Studio
+                </a>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sampleUrl = `https://youtube.com/live/${selectedMatch?.id?.substring(0, 8)}?feature=share`;
+                    setYtUrl(sampleUrl);
+                    showToast('Pasted stream template! Edit or click Save & Share.');
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                    padding: '8px 12px',
+                    borderRadius: 'var(--radius-md)',
+                    background: 'var(--bg-primary)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text-primary)',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <span>⚡</span> Quick Auto-Fill URL
+                </button>
+              </div>
+            )}
+
             <div style={{ display: 'flex', gap: 8 }}>
               <input
                 type="url"
                 className="input"
-                placeholder="https://youtube.com/live/..."
+                placeholder="https://youtube.com/live/... or https://youtu.be/..."
                 value={ytUrl}
                 onChange={e => { setYtUrl(e.target.value); setYtSaved(false); }}
                 style={{ flex: 1, height: 40, fontSize: 13 }}
@@ -1379,7 +2295,7 @@ export default function BroadcastStudioPage() {
                   flexShrink: 0,
                 }}
               >
-                {ytSaving ? '...' : ytSaved ? '✓ Saved' : 'Share'}
+                {ytSaving ? '...' : ytSaved ? '✓ Saved' : 'Save & Share'}
               </button>
             </div>
             {ytError && (

@@ -19,27 +19,42 @@ public class Match {
     @Id
     private String id;
 
-    @Column(name = "tournament_id", nullable = false)
+    @Column(name = "tournament_id")
     private String tournamentId;
 
-    @Column(name = "event_id", nullable = false)
+    @Column(name = "event_id")
     private String eventId;
 
-    @Column(name = "fixture_round", nullable = false)
+    @Column(name = "fixture_round")
     private Integer fixtureRound;
 
-    @Column(name = "fixture_position", nullable = false)
+    @Column(name = "round_name")
+    private String roundName;
+
+    @Column(name = "fixture_position")
     private Integer fixturePosition;
 
-    private String court;
+    @Column(name = "is_adhoc")
+    @com.fasterxml.jackson.annotation.JsonProperty("is_adhoc")
+    private Boolean isAdhoc;
 
-    @Column(name = "player1_id", nullable = false)
+    @Column(name = "adhoc_type")
+    @com.fasterxml.jackson.annotation.JsonProperty("adhoc_type")
+    private String adhocType;
+
+    private String court;
+    
+    @Column(name = "max_viewers")
+    @com.fasterxml.jackson.annotation.JsonProperty("max_viewers")
+    private Integer maxViewers;
+
+    @Column(name = "player1_id")
     private String player1Id;
 
     @Column(name = "player1_name", nullable = false)
     private String player1Name;
 
-    @Column(name = "player2_id", nullable = false)
+    @Column(name = "player2_id")
     private String player2Id;
 
     @Column(name = "player2_name", nullable = false)
@@ -69,6 +84,14 @@ public class Match {
     @Column(name = "winner_id")
     private String winnerId;
 
+    @Column(name = "sport")
+    private String sport = "badminton";
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "sport_metadata", columnDefinition = "jsonb")
+    @com.fasterxml.jackson.annotation.JsonProperty("sport_metadata")
+    private java.util.Map<String, Object> sportMetadata;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "sets", columnDefinition = "jsonb")
     private List<MatchSet> sets;
@@ -77,27 +100,71 @@ public class Match {
     @Column(name = "sub_matches", columnDefinition = "jsonb")
     private List<TeamSubMatch> subMatches;
 
-    @Data
     @NoArgsConstructor
     @AllArgsConstructor
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
     public static class MatchSet {
-        private int set_number;
-        private int player1_score;
-        private int player2_score;
-        private boolean is_complete;
-        private String winner_id;
+        @com.fasterxml.jackson.annotation.JsonProperty("set_number")
+        private int setNumber;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("player1_score")
+        private int player1Score;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("player2_score")
+        private int player2Score;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("is_complete")
+        private boolean isComplete;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("winner_id")
+        private String winnerId;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("set_number")
+        public int getSetNumber() { return setNumber; }
+        @com.fasterxml.jackson.annotation.JsonProperty("set_number")
+        public void setSetNumber(int setNumber) { this.setNumber = setNumber; }
+
+        @com.fasterxml.jackson.annotation.JsonProperty("player1_score")
+        public int getPlayer1Score() { return player1Score; }
+        @com.fasterxml.jackson.annotation.JsonProperty("player1_score")
+        public void setPlayer1Score(int player1Score) { this.player1Score = player1Score; }
+
+        @com.fasterxml.jackson.annotation.JsonProperty("player2_score")
+        public int getPlayer2Score() { return player2Score; }
+        @com.fasterxml.jackson.annotation.JsonProperty("player2_score")
+        public void setPlayer2Score(int player2Score) { this.player2Score = player2Score; }
+
+        @com.fasterxml.jackson.annotation.JsonProperty("is_complete")
+        public boolean isComplete() { return isComplete; }
+        @com.fasterxml.jackson.annotation.JsonProperty("is_complete")
+        public void setComplete(boolean isComplete) { this.isComplete = isComplete; }
+
+        @com.fasterxml.jackson.annotation.JsonProperty("winner_id")
+        public String getWinnerId() { return winnerId; }
+        @com.fasterxml.jackson.annotation.JsonProperty("winner_id")
+        public void setWinnerId(String winnerId) { this.winnerId = winnerId; }
     }
 
     @Data
     @NoArgsConstructor
     @AllArgsConstructor
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
     public static class TeamSubMatch {
         private String id;
-        private String event_type;
-        private List<String> player1_names;
-        private List<String> player2_names;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("event_type")
+        private String eventType;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("player1_names")
+        private List<String> player1Names;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("player2_names")
+        private List<String> player2Names;
+
         private List<MatchSet> sets;
         private String status;
-        private String winner_id;
+
+        @com.fasterxml.jackson.annotation.JsonProperty("winner_id")
+        private String winnerId;
     }
 }
